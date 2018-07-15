@@ -65,7 +65,7 @@ class Simulation:
         ax.imshow(np.array(img), interpolation=None)
         plt.show()
 
-    def run(self, fps=20, ball_control=None, quiet=False, leave_trail=True):
+    def run(self, fps=20, ball_control=None, quiet=False, leave_trail=True, world=1):
         """
         Args:
             ball_control: either a function of the y position of the ball which
@@ -77,11 +77,20 @@ class Simulation:
         ball = Ball(self.w/2, self.h)
         ball_a = -50  # ball upwards acceleration
 
-        walls = [
-            Wall(0, 500, 300, 50),
-            Wall(self.w-250, 100, 250, 200),
-            Wall(0, 100, 100, 200)
-        ]
+        if world == 1:
+            walls = [
+                Wall(0, 500, 300, 50),
+                Wall(self.w-250, 100, 250, 200),
+                Wall(0, 100, 100, 200)
+            ]
+        elif world == 2:
+            walls = [
+                Wall(self.w/2-100, 600, 200, 50),
+                Wall(self.w-150, 100, 150, 300),
+                Wall(0, 100, 150, 300),
+            ]
+        else:
+            raise ValueError()
 
         physics_timer = 0
         wallclock_timer = time.time()
@@ -138,7 +147,7 @@ class Simulation:
 
 def main():
     sim = Simulation()
-    sim.run(fps=20, ball_control=None, quiet=False)
+    sim.run(fps=20, ball_control=None, quiet=False, world=2)
 
 if __name__ == '__main__':
     main()
