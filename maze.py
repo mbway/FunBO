@@ -27,8 +27,8 @@ class Ball:
         w = 20
         return pg.Rect(x-w/2, y-w/2, w, w)
 
-    def is_colliding(self, walls):
-        rects = [w.rect for w in walls]
+    def is_colliding(self, world):
+        rects = [wall.rect for wall in world]
         i = self.get_rect().collidelist(rects)
         return i != -1  # returns index so -1 => no collision
 
@@ -40,7 +40,6 @@ class Wall:
         pg.draw.rect(surface, (0, 200, 0), self.rect)
 
 
-
 class Simulation:
     def __init__(self):
         pg.init()
@@ -50,6 +49,22 @@ class Simulation:
         pg.display.set_caption('Simulation')
         self.surface = pg.Surface(self.screen.get_size()).convert()
         self.clock = pg.time.Clock()
+
+    def get_world(self, world_num):
+        if world_num == 1:
+            return [
+                Wall(0, 500, 300, 50),
+                Wall(self.w-250, 100, 250, 200),
+                Wall(0, 100, 100, 200)
+            ]
+        elif world_num == 2:
+            return [
+                Wall(self.w/2-100, 600, 200, 50),
+                Wall(self.w-150, 100, 150, 300),
+                Wall(0, 100, 150, 300),
+            ]
+        else:
+            raise ValueError()
 
     def render_trail(self, ball_control):
         self.run(fps=5000, ball_control=ball_control, quiet=True, leave_trail=True)
@@ -65,7 +80,7 @@ class Simulation:
         ax.imshow(np.array(img), interpolation=None)
         plt.show()
 
-    def run(self, fps=20, ball_control=None, quiet=False, leave_trail=True, world=1):
+    def run(self, fps=20, ball_control=None, quiet=False, leave_trail=True, world_num=1):
         """
         Args:
             ball_control: either a function of the y position of the ball which
@@ -77,21 +92,9 @@ class Simulation:
         ball = Ball(self.w/2, self.h)
         ball_a = -50  # ball upwards acceleration
 
-        if world == 1:
-            walls = [
-                Wall(0, 500, 300, 50),
-                Wall(self.w-250, 100, 250, 200),
-                Wall(0, 100, 100, 200)
-            ]
-        elif world == 2:
-            walls = [
-                Wall(self.w/2-100, 600, 200, 50),
-                Wall(self.w-150, 100, 150, 300),
-                Wall(0, 100, 150, 300),
-            ]
-        else:
-            raise ValueError()
+        world = self.get_world(world_num)
 
+        trail = [] # record the (x,y) locations of the ball
         physics_timer = 0
         wallclock_timer = time.time()
         self.surface.fill(BLACK)
@@ -118,10 +121,11 @@ class Simulation:
                 #ball.vel.x += ball_control(state) * physics_delta
 
             ball.physics_update(physics_delta)
+            trail.append((ball.pos.x, ball.pos.y))
             ball.draw(self.surface)
 
-            for w in walls:
-                w.draw(self.surface)
+            for wall in world:
+                wall.draw(self.surface)
 
             # ball reached the top
             if ball.pos.y <= 0:
@@ -131,7 +135,7 @@ class Simulation:
             if ball.pos.x <= 0 or ball.pos.x >= self.w:
                 break
             # ball collided with a wall
-            if ball.is_colliding(walls):
+            if ball.is_colliding(world):
                 break
 
             physics_timer += physics_delta
@@ -143,7 +147,7 @@ class Simulation:
         if not quiet:
             real_time = time.time() - wallclock_timer
             print('simulation finished with score {} in {:.1f}s ({:.1f} realtime)'.format(score, physics_timer, real_time))
-        return score
+        return score, trail
 
 def main():
     sim = Simulation()
