@@ -10,6 +10,9 @@ import warnings
 import turbo as tb
 import turbo.modules as tm
 
+#TODO: hyperparameter continuity
+
+
 class PiecewiseFunction:
     def __init__(self, xs, ys, interpolation='linear'):
         self.control_xs = xs
@@ -21,7 +24,11 @@ class PiecewiseFunction:
         return 'PiecewiseFunction<{}>'.format(cs)
 
     def __call__(self, x):
-        return self.f(x)
+        try:
+            return self.f(x)
+        except ValueError as e:
+            e.args = ((e.args[0] + '  x = {}'.format(x)),)
+            raise e
 
 
 def maximise(f, range_):
@@ -69,7 +76,25 @@ def tracking_weights(X, prev_xy, l):
     return k_RBF(rs.reshape(-1, 1), sigma=1, l=l).flatten()
 
 
-class GPPriorSelectConfig:
+class Immutable:
+    def __init__(self):
+        self.immutable = False
+
+    def __setattr__(self, name, value):
+        """ limit the ability to set attributes. New attributes can only be
+        created from the constructor.
+
+        This can help prevent typos caused by getting the name of a module wrong
+        (or catching when a name changes due to an API update), which would
+        otherwise fail silently, especially if default settings are loaded.
+        """
+        immutable = hasattr(self, 'immutable') and self.immutable
+        if hasattr(self, name) or not immutable:
+            object.__setattr__(self, name, value)
+        else:
+            raise AttributeError('{} Object does not have an "{}" attribute!'.format(type(self), name))
+
+class GPPriorSelectConfig(Immutable):
     """
     Attributes:
         mu: the mean function for the Gaussian process prior which is
@@ -83,23 +108,28 @@ class GPPriorSelectConfig:
         self.kernel = GPy.kern.RBF(input_dim=1, variance=1.0, lengthscale=1.0) # TODO: not multi-dimensional
         _, xmin, xmax = domain_bounds # TODO: not multi dimensional
         self.control_xs = np.linspace(xmin, xmax, num=100)
+        self.immutable = True
 
-class RandomSelectConfig:
+class RandomSelectConfig(Immutable):
     """
     Attributes:
     """
     def __init__(self, domain_bounds):
         _, xmin, xmax = domain_bounds # TODO: not multi dimensional
         self.control_xs = np.linspace(xmin, xmax, num=10)
+        self.immutable = True
 
-class BayesSelectConfig:
+class BayesSelectConfig(Immutable):
     r"""
     Attributes:
         reward_combo: the weighting $(\alpha, \beta)$ (both $\in[0,1]$) for the
             local rewards $R_l$ and global reward $R_g$ in the convex combination
             $\alpha*R_l + \beta*R_g$
         kernel: the kernel to use for the surrogate model
-        surrogate_optimise_iterations: the number of optimiser iterations to fit the surrogate model to the data
+        surrogate_class: the class to use as the surrogate model, eg `GPy.models.(GPRegression|SparseGPRegression)`
+        surrogate_model_params: the parameters to pass to the constructor of surrogate_class
+        surrogate_optimise_params: the parameters to pass to optimize_restarts
+        surrogate_optimise_init: used for hyperparameter continuity. None => start from a random location
         control_xs: the x values to calculate the optimal y value and use (x,y) as a control point for the function sample
         acquisition: the acquisition function to use
         acquisition_param: the exploration/exploitation trade-off parameter passed to the acquisition function
@@ -107,13 +137,23 @@ class BayesSelectConfig:
     """
     def __init__(self, domain_bounds):
         self.reward_combo = (1, 0)
-        self.kernel = GPy.kern.RBF(input_dim=2, ARD=True) # TODO: not multi-dimensional
-        self.surrogate_optimise_iterations = 10
+        self.surrogate_class = GPy.models.GPRegression
+        self.surrogate_model_params = dict(
+            kernel=GPy.kern.RBF(input_dim=2, ARD=True), # TODO: not multi-dimensional
+            normalizer=True
+        )
+        self.surrogate_optimise_params = dict(
+            parallel=True,
+            verbose=False,
+            num_restarts=10 # actually the number of iterations
+        )
+        self.surrogate_init_params = None # for hyperparameter continuity
         _, xmin, xmax = domain_bounds # TODO: not multi dimensional
         self.control_xs = np.linspace(xmin, xmax, num=50)
         self.acquisition = UCB
         self.acquisition_param = 1.0
-        self.tracking_l = 10 #TODO: might want another kernel other than RBF
+        self.tracking_l = 1.0 #TODO: might want another kernel other than RBF
+        self.immutable = True
 
 
 class CoordinatorBase:
@@ -137,6 +177,9 @@ class CoordinatorBase:
             BayesSelectConfig => perform a Bayesian selection with the given configuration
         """
         raise NotImplemented()
+
+    def trial_finished(self, trial_num, trial):
+        pass
 
 
 class Coordinator(CoordinatorBase):
@@ -169,17 +212,19 @@ class Coordinator(CoordinatorBase):
         else:
             return None
 
+    def trial_finished(self, trial_num, trial):
+        pass
+
     def get_pre_phase_config(self, trial_num):
         """ override this method to change the behaviour """
-        return RandomSelectConfig()
+        return RandomSelectConfig(self.domain_bounds)
 
     def get_bayes_config(self, trial_num):
         """ override this method to change the behaviour """
         return BayesSelectConfig(self.domain_bounds)
 
 
-
-class Optimiser:
+class Optimiser(Immutable):
     """
     Attributes:
         clip_range: whether to bound the outputs of any generated function to lie strictly within range_bounds
@@ -194,10 +239,16 @@ class Optimiser:
             coordinator: see `Coordinator`
         """
         self.objective = objective
+
         self.domain_bounds = domain_bounds # TODO: wrap in turbo bounds
+        assert domain_bounds[2] > domain_bounds[1]
+
         self.range_bounds = range_bounds
         assert len(range_bounds) == 2
+        assert range_bounds[1] > range_bounds[0]
+
         self.coordinator = coordinator
+
         assert desired_extremum in ('min', 'max')
         self.desired_extremum = desired_extremum
 
@@ -208,7 +259,15 @@ class Optimiser:
         self.has_run = False
         self.trials = []
 
-    Trial = namedtuple('Trial', ['trial_num', 'config', 'f', 'R_ls', 'R_g', 'surrogate'])
+        # prevent creating new attributes
+        self.immutable = True
+
+    Trial = namedtuple('Trial', ['trial_num', 'config', 'f', 'R_ls', 'R_g', 'surrogate', 'eval_info'])
+    Trial.__doc__ = """ Holds data for a single trial/iteration of the optimiser
+
+    Attributes:
+        eval_info: optional data returned from the objective function
+    """
 
 
     def is_maximising(self):
@@ -234,6 +293,7 @@ class Optimiser:
         The difference between this function and select_GP_prior is that each
         control point here is independent.
         """
+        assert isinstance(c, RandomSelectConfig)
         ys = [np.random.uniform(*self.range_bounds) for _ in c.control_xs]
         return PiecewiseFunction(c.control_xs, ys, interpolation='quadratic')
 
@@ -246,6 +306,7 @@ class Optimiser:
         Returns:
             a function which can be evaluated anywhere in the domain
         """
+        assert isinstance(c, GPPriorSelectConfig)
         xs = c.control_xs.reshape(-1, 1) # points to sample at
         # mean function
         mus = np.zeros(len(xs)) if c.mu is None else np.array([c.mu(np.asscalar(x)) for x in xs])
@@ -283,6 +344,7 @@ class Optimiser:
         Args:
             c (BayesSelectConfig): the configuration for the selection
         """
+        assert isinstance(c, BayesSelectConfig)
         X = [] # (x, y)
         R = [] # R_l(x,y)
         # weighting for the convex combination of the local and global reward to model
@@ -295,12 +357,46 @@ class Optimiser:
         X = np.array(X)
         R = np.array(R).reshape(-1,1)
 
-        surrogate = GPy.models.GPRegression(X, R, c.kernel)
+
+        # don't initialise the model until the initial hyperparameters have been set
+        # will always raise RuntimeWarning("Don't forget to initialize by self.initialize_parameter()!")
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', '.*initialize_parameter.*')
+            surrogate = c.surrogate_class(X, R, initialize=False, **c.surrogate_model_params)
+
+        # these steps for initialising a model from stored parameters are from https://github.com/SheffieldML/GPy
+        surrogate.update_model(False)  # prevents the GP from fitting to the data until we are ready to enable it manually
+        surrogate.initialize_parameter()  # initialises the hyperparameter objects
+        if c.surrogate_init_params is not None:
+            surrogate[:] = c.surrogate_init_params
+        surrogate.update_model(True)
+
+        # the current parameters are used as one of the starting locations (as of the time of writing)
+        # https://github.com/sods/paramz/blob/master/paramz/model.py
         with warnings.catch_warnings(record=True) as ws:
             # num_restarts is actually the number of iterations
-            surrogate.optimize_restarts(num_restarts=c.surrogate_optimise_iterations, parallel=True, verbose=False)
+            r = c.surrogate_optimise_params.get('num_restarts', None)
+            if r is None or r > 0:
+                surrogate.optimize_restarts(**c.surrogate_optimise_params)
+
+        if c.surrogate_optimise_params.get('verbose'):
+            for w in ws:
+                print(w)
 
         f = self.extract_function(surrogate, c)
+        return f, surrogate
+
+    def select(self, c):
+        if isinstance(c, RandomSelectConfig):
+            f = self.select_random(c)
+            surrogate = None
+        elif isinstance(c, GPPriorSelectConfig):
+            f = self.select_GP_prior(c)
+            surrogate = None
+        elif isinstance(c, BayesSelectConfig):
+            f, surrogate = self.select_bayes(c)
+        else:
+            raise ValueError()
         return f, surrogate
 
 
@@ -317,20 +413,21 @@ class Optimiser:
 
             if c is None:
                 break # finished
-            elif isinstance(c, RandomSelectConfig):
-                f = self.select_random(c)
-                surrogate = None
-            elif isinstance(c, GPPriorSelectConfig):
-                f = self.select_GP_prior(c)
-                surrogate = None
-            elif isinstance(c, BayesSelectConfig):
-                f, surrogate = self.select_bayes(c)
-            else:
-                raise ValueError()
 
-            R_ls, R_g = self.objective(f)
-            t = Optimiser.Trial(trial_num, c, f, R_ls, R_g, surrogate)
+            f, surrogate = self.select(c)
+
+            res = self.objective(f)
+            if len(res) == 2:
+                R_ls, R_g = res
+                eval_info = None
+            elif len(res) == 3:
+                R_ls, R_g, eval_info = res
+            else:
+                raise ValueError('wrong number of values ({}) returned from objective function'.format(len(res)))
+
+            t = Optimiser.Trial(trial_num, c, f, R_ls, R_g, surrogate, eval_info)
             self.trials.append(t)
+            self.coordinator.trial_finished(trial_num, t)
             trial_num += 1
 
         print('optimisation finished: {} trials in {:.1f} seconds'.format(trial_num, time.time()-start))

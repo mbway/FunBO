@@ -27,7 +27,7 @@ try:
         print('plotly setup')
         ply.init_notebook_mode(connected=False)
 except ImportError:
-    pass
+    ply = None
 
 
 def unzip(l):
@@ -66,7 +66,8 @@ def plot_convergence(optimiser, best_R_g):
     xs = np.arange(len(optimiser.trials))
     ys = [t.R_g for t in optimiser.trials]
     ax.plot(xs, ys, label='$R_g$')
-    ax.axhline(y=best_R_g, linestyle=':', color='grey', label='best $R_g$')
+    if best_R_g is not None:
+        ax.axhline(y=best_R_g, linestyle=':', color='grey', label='best $R_g$')
     ax.legend()
     ax.set_ylabel('$R_g$')
     ax.set_xlabel('trial')
@@ -247,6 +248,7 @@ def plot_surrogate(optimiser, surrogate, ylim=None, midpoint_fraction=None):
     return fig
 
 def plot_surrogate_3D(optimiser, surrogate, show_var=True, flip_z=False):
+    assert ply is not None, 'plotly not imported'
     assert surrogate is not None, 'no surrogate'
     x_name, xmin, xmax = optimiser.domain_bounds
     xs = np.linspace(xmin, xmax, num=100)
@@ -267,10 +269,11 @@ def plot_surrogate_3D(optimiser, surrogate, show_var=True, flip_z=False):
     if show_var:
         sig_grid = points_to_grid(np.sqrt(np.clip(var_points, 0, np.inf)), grid)
         n_sig = 2
-        colors = np.full_like(grid[0] ,'#0000ff', dtype='S7') # numpy strings are fixed length
+        color_row = ['#0000ff'] * grid[0].shape[1]
+        colors = [color_row] * grid[0].shape[0]
         data.extend([
             go.Surface(x=grid[0], y=grid[1], z=mus_grid + n_sig*sig_grid, surfacecolor=colors, opacity=0.3, showscale=False),
-            go.Surface(x=grid[0], y=grid[1], z=mus_grid - n_sig*sig_grid, surfacecolor=colors, opacity=0.3, showscale=False),
+            #go.Surface(x=grid[0], y=grid[1], z=mus_grid - n_sig*sig_grid, surfacecolor=colors, opacity=0.3, showscale=False),
         ])
 
     layout = go.Layout(

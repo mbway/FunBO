@@ -66,14 +66,14 @@ class Simulation:
         else:
             raise ValueError()
 
-    def render_trail(self, ball_control):
-        self.run(fps=5000, ball_control=ball_control, quiet=True, leave_trail=True)
+    def render_trail(self, ball_control, world_num=1):
+        self.run(fps=5000, ball_control=ball_control, quiet=True, leave_trail=True, world_num=world_num)
         data = pg.image.tostring(self.surface, 'RGBA')
         img = Image.frombytes('RGBA', (self.w, self.h), data)
         return img
 
-    def show_trail(self, ball_control):
-        img = self.render_trail(ball_control)
+    def show_trail(self, ball_control, world_num=1):
+        img = self.render_trail(ball_control, world_num)
         scale = 100
         fig, ax = plt.subplots(figsize=(self.w/scale, self.h/scale))
         ax.grid(None)
@@ -151,7 +151,12 @@ class Simulation:
 
 def main():
     sim = Simulation()
-    sim.run(fps=20, ball_control=None, quiet=False, world=2)
+    try:
+        world_num = int(sys.argv[1])
+    except ValueError:
+        print('usage: maze.py <world_num>')
+        sys.exit(1)
+    sim.run(fps=20, ball_control=None, quiet=False, world_num=world_num)
 
 if __name__ == '__main__':
     main()
