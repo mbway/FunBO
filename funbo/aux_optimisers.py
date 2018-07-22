@@ -4,11 +4,14 @@ Auxiliary optimisers
 """
 
 import numpy as np
-import warnings
 import scipy.optimize
+import warnings
+
+# local imports
+from .utils import uniform_random_in_bounds
 
 
-def maximise_random_quasi_newton(f, bounds, num_random, num_take_random, num_bfgs, exact_gradient):
+def maximise_random_quasi_Newton(f, bounds, num_random, num_take_random, num_bfgs, exact_gradient):
     """ maximise the given function by first sampling randomly, then taking the
         `num_take_random` best samples and using them as starting points in BFGS
         optimisation.
@@ -34,9 +37,7 @@ def maximise_random_quasi_newton(f, bounds, num_random, num_take_random, num_bfg
         r_best_xs, r_best_ys = np.empty(shape=(0, len(bounds))), np.empty(shape=(0, 1))
 
     # can return None, None if every iteration fails
-    g_best_x, g_best_y, warnings = maximise_quasi_Newton(f, bounds, num_bfgs, 1, exact_gradient, starting_points=r_best_xs)
-    if warnings:
-        print(warnings)
+    g_best_x, g_best_y = maximise_quasi_Newton(f, bounds, num_bfgs, 1, exact_gradient, starting_points=r_best_xs)
 
     if num_random > 0 and (g_best_y is None or r_best_ys[0] > g_best_y):
         return r_best_xs[0], r_best_ys[0]
@@ -82,9 +83,8 @@ def maximise_quasi_Newton(f, bounds, num_its, num_take, exact_gradient, starting
             at, one per row. None => use `num_its` uniform random starting points
 
     Returns:
-        `(best_xs, best_ys, warnings)` where `best_xs` and `best_ys` are
-        matrices with `num_take` rows. Or `(None, None, warnings)` if all
-        iterations failed.
+        `(best_xs, best_ys)` where `best_xs` and `best_ys` are matrices with
+        `num_take` rows. Or `(None, None)` if all iterations failed.
     """
 
     assert 0 < num_take <= num_its
@@ -102,23 +102,22 @@ def maximise_quasi_Newton(f, bounds, num_its, num_take, exact_gradient, starting
     # the minimiser passes x as (num_attribs,) but f takes (1,num_attribs)
     opt_fun = lambda x: -f(x.reshape(1, -1))
 
-    with warnings.catch_warnings(record=True) as ws:
-        for i in range(num_its):
-            result = scipy.optimize.minimize(
-                fun=opt_fun,
-                x0=starting_points[i].reshape(1, -1),
-                jac=exact_gradient, # whether f returns the gradient
-                bounds=bounds,
-                method='L-BFGS-B',  # Limited-Memory Broyden-Fletcher-Goldfarb-Shanno Bounded
-            )
-            if not result.success:
-                warnings.warn('iteration {}/{} of LBFGSB optimisation failed'.format(i+1, num_its))
-            else:
-                xs.append(result.x)
-                neg_ys.append(result.fun)
+    for i in range(num_its):
+        result = scipy.optimize.minimize(
+            fun=opt_fun,
+            x0=starting_points[i].reshape(1, -1),
+            jac=exact_gradient, # whether f returns the gradient
+            bounds=bounds,
+            method='L-BFGS-B',  # Limited-Memory Broyden-Fletcher-Goldfarb-Shanno Bounded
+        )
+        if not result.success:
+            warnings.warn('iteration {}/{} of LBFGSB optimisation failed'.format(i+1, num_its))
+        else:
+            xs.append(result.x)
+            neg_ys.append(result.fun)
 
     if not xs: # all iterations failed
-        return None, None, ws
+        return None, None
 
     # ensure that the inputs lie within the bounds
     # (which may not be the case due to floating point error)
@@ -132,17 +131,5 @@ def maximise_quasi_Newton(f, bounds, num_its, num_take, exact_gradient, starting
     best_ids = np.argsort(neg_ys, axis=0).flatten()  # sorted indices (neg_ys is negative already so sort in descending order)
     take_ids = best_ids[:num_take]
 
-    return xs[take_ids], ys[take_ids], ws
-
-
-def uniform_random_in_bounds(num_samples, bounds):
-    """ generate `num_samples` uniform randomly distributed points inside the given bounds
-    """
-    assert num_samples > 0 and bounds
-    # build up the vectors element by element
-    cols = []
-    for rmin, rmax in bounds:
-        assert rmin <= rmax
-        cols.append(np.random.uniform(rmin, rmax, size=(num_samples, 1)))
-    return np.hstack(cols)
+    return xs[take_ids], ys[take_ids]
 

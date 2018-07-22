@@ -56,16 +56,6 @@ class Schwefel:
 
 
 class TestAuxOptimisers(unittest.TestCase):
-    def test_uniform_in_bounds(self):
-        self.assertRaises(AssertionError, aux_optimisers.uniform_random_in_bounds, 0, [])
-        self.assertRaises(AssertionError, aux_optimisers.uniform_random_in_bounds, 0, [(0, 1)])
-
-        self.assertRaises(AssertionError, aux_optimisers.uniform_random_in_bounds, 1, [])
-
-        aux_optimisers.uniform_random_in_bounds(1, [(0, 1)])
-        self.assertRaises(AssertionError, aux_optimisers.uniform_random_in_bounds, 1, [(1, 0)])
-        aux_optimisers.uniform_random_in_bounds(1, [(1, 1)])
-
     def test_maximise_random(self):
         np.random.seed(0)
 
@@ -87,8 +77,7 @@ class TestAuxOptimisers(unittest.TestCase):
 
         s = Schwefel(2)
         #s.plot()
-        xs, ys, ws = aux_optimisers.maximise_quasi_Newton(s, s.bounds, num_its=100, num_take=20, exact_gradient=False, starting_points=None)
-        self.assertFalse(ws)
+        xs, ys = aux_optimisers.maximise_quasi_Newton(s, s.bounds, num_its=100, num_take=20, exact_gradient=False, starting_points=None)
         # xs and ys are the expected shapes
         self.assertTrue(xs.shape == (20, 2))
         self.assertTrue(ys.shape == (20, 1))
