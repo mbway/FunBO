@@ -93,7 +93,7 @@ class TestAuxOptimisers(unittest.TestCase):
 
         s = Schwefel(2)
         #s.plot()
-        x, y = aux_optimisers.maximise_random_quasi_newton(s, s.bounds, num_random=1000, num_take_random=50, num_bfgs=100, exact_gradient=False)
+        x, y = aux_optimisers.maximise_random_quasi_Newton(s, s.bounds, num_random=1000, num_take_random=50, num_bfgs=100, exact_gradient=False)
         # xs and ys are the expected shapes
         self.assertTrue(x.shape == (1, 2))
         self.assertTrue(y.shape == (1, 1))

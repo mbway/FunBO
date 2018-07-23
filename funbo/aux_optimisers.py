@@ -8,10 +8,10 @@ import scipy.optimize
 import warnings
 
 # local imports
-from .utils import uniform_random_in_bounds
+from .utils import uniform_random_in_bounds, show_warnings
 
 
-def maximise_random_quasi_Newton(f, bounds, num_random, num_take_random, num_bfgs, exact_gradient):
+def maximise_random_quasi_Newton(f, bounds, num_random, num_take_random, num_bfgs, exact_gradient, quiet=True):
     """ maximise the given function by first sampling randomly, then taking the
         `num_take_random` best samples and using them as starting points in BFGS
         optimisation.
@@ -25,8 +25,10 @@ def maximise_random_quasi_Newton(f, bounds, num_random, num_take_random, num_bfg
         num_take_random: the number of best random samples to use as starting
             points for BFGS
         num_bfgs: the number of BFGS iterations to perform
-        exact_gradient: whether `f` returns the gradient as well as the values.
-            If False then the gradient is approximated numerically.
+        exact_gradient: whether `f` returns the gradient as well as the values
+            when passed `return_gradient=True`.  If False then the gradient is
+            approximated numerically.
+        quiet: whether to show warnings caused by failed optimisation iterations
 
     Returns:
         `(best_x, best_y)`
@@ -37,7 +39,10 @@ def maximise_random_quasi_Newton(f, bounds, num_random, num_take_random, num_bfg
         r_best_xs, r_best_ys = np.empty(shape=(0, len(bounds))), np.empty(shape=(0, 1))
 
     # can return None, None if every iteration fails
-    g_best_x, g_best_y = maximise_quasi_Newton(f, bounds, num_bfgs, 1, exact_gradient, starting_points=r_best_xs)
+    with warnings.catch_warnings(record=True) as ws:
+        g_best_x, g_best_y = maximise_quasi_Newton(f, bounds, num_bfgs, 1, exact_gradient, starting_points=r_best_xs)
+    if not quiet:
+        show_warnings(ws)
 
     if num_random > 0 and (g_best_y is None or r_best_ys[0] > g_best_y):
         return r_best_xs[0], r_best_ys[0]
@@ -100,7 +105,16 @@ def maximise_quasi_Newton(f, bounds, num_its, num_take, exact_gradient, starting
     neg_ys = []
 
     # the minimiser passes x as (num_attribs,) but f takes (1,num_attribs)
-    opt_fun = lambda x: -f(x.reshape(1, -1))
+    if exact_gradient:
+        # negate both the value and the gradient
+        opt_fun = lambda x: tuple(-v for v in f(x.reshape(1, -1), return_gradient=True))
+    else:
+        opt_fun = lambda x: -f(x.reshape(1, -1))
+
+    #import matplotlib.pyplot as plt
+    #ys = np.linspace(*bounds[0], num=100)
+    #plt.plot(ys, np.array([opt_fun(y) for y in ys]).flatten())
+    #plt.show()
 
     for i in range(num_its):
         result = scipy.optimize.minimize(

@@ -175,9 +175,12 @@ class WeightedExtractionConfig(FixedAttributes):
         self.aux_optimiser = aux_optimisers.maximise_random_quasi_Newton
         self.aux_optimiser_params = dict(
             num_random=10_000,
-            num_take_random=4,
-            num_bfgs=10,
-            exact_gradient=False
+            # since extraction consists of many 'easy' 1D optimisations, BFGS is
+            # only needed to slightly tweak the best random result.
+            num_take_random=1,
+            num_bfgs=1,
+            exact_gradient=False,
+            quiet=True # don't show warnings
         )
         self.tracking_l = 1.0 #TODO: might want another kernel other than RBF
         xmin, xmax = optimiser.domain_bounds[0] # TODO: not multi dimensional

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+for f in test_*.py; do
+    echo "---------------------------------------"
+    echo "$f"
+    eval "./$f"
+done
+
+# or alternatively
+# python3 -m unittest discover .
+

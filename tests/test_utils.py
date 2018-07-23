@@ -12,24 +12,39 @@ class TestUtils(unittest.TestCase):
     def test_rbf(self):
         """ test k_RBF against the GPy RBF implementation """
 
-        def k_with_GPy(r, sigma, l):
+        def k_with_GPy(X, center, sigma, l, return_gradient=False):
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', '.*')
                 k = GPy.kern.RBF(input_dim=1, variance=sigma**2, lengthscale=l)
-                v = k.K(np.array([[0]]), np.array([[r]]))
-                return np.asscalar(v)
+                v = k.K(X, center)
+                if return_gradient:
+                    dv_dr = k.dK_dr_via_X(X, center)
+                    # remember in GPy, r is the _scaled_ r
+                    # r = |x-center|/l
+                    # d/dx |x|=x/|x|
+                    diff = X - center
+                    dr_dx = diff/(np.abs(diff)*l)
+                    dv_dx = dv_dr * dr_dx
+                    return v, dv_dx
+                else:
+                    return v
 
         sigma, l = 4, 0.5
+        center = np.array([[-1.23]])
 
         # test a single r
-        r = 0.8
-        self.assertTrue(np.isclose(utils.k_RBF(r, sigma, l), k_with_GPy(r, sigma, l)))
+        X = np.array([[0.8]])
+        self.assertTrue(np.isclose(utils.k_RBF(X, center, sigma, l), k_with_GPy(X, center, sigma, l)))
 
         # test rs as a column
-        rs = np.linspace(0.4, 2.5, num=10).reshape(-1, 1)
-        vals = utils.k_RBF(rs, sigma, l)
-        for i, v in enumerate(vals):
-            self.assertTrue(np.isclose(v, k_with_GPy(np.asscalar(rs[i]), sigma, l)))
+        X = np.linspace(-4, 2.5, num=10).reshape(-1, 1)
+        vals = utils.k_RBF(X, center, sigma, l)
+        self.assertTrue(np.allclose(vals, k_with_GPy(X, center, sigma, l)))
+
+        vals, dvals = utils.k_RBF(X, center, sigma, l, True)
+        gpyvals, dgpyvals = k_with_GPy(X, center, sigma, l, True)
+        self.assertTrue(np.allclose(vals, gpyvals))
+        self.assertTrue(np.allclose(dvals, dgpyvals))
 
     def test_uniform_in_bounds(self):
         np.random.seed(0)

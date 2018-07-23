@@ -8,7 +8,8 @@ from collections import namedtuple
 import warnings
 
 # local imports
-from .utils import FixedAttributes, PiecewiseFunction, k_RBF
+from .utils import FixedAttributes, PiecewiseFunction, k_RBF, show_warnings
+from .acquisition import RBF_weighted
 from .coordinator import *
 
 
@@ -35,8 +36,7 @@ class Trial(FixedAttributes):
 
 
 class Optimiser(FixedAttributes):
-    """ Continuous Function Bayesian Optimisation
-    """
+    """ Continuous Function Bayesian Optimisation """
     slots = (
         'objective', 'domain_names', 'domain_bounds', 'range_bounds',
         'coordinator', 'desired_extremum', 'clip_range', 'has_run', 'trials'
@@ -129,25 +129,40 @@ class Optimiser(FixedAttributes):
         prev_xy = None
         for x in c.control_xs:
 
-            def acq(ys):
+            def get_X(ys):
+                xs = np.repeat(x.reshape(1, -1), ys.shape[0], axis=0) # stack copies of x as rows
+                X = np.hstack((xs, ys))
+                return X
+
+            X = get_X(np.linspace(*self.range_bounds, num=500).reshape(-1, 1))
+            worst_acq = np.min(c.acquisition(X, surrogate=surrogate,
+                                             maximising=self.is_maximising(),
+                                             **c.acquisition_params))
+
+            def acq(ys, return_gradient=False):
                 """ with x fixed, given ys as rows calculate the weighted
                 acquisition function for the pairs of x and y
                 """
-                xs = np.repeat(x.reshape(1, -1), ys.shape[0], axis=0) # stack copies of x as rows
-                X = np.hstack((xs, ys))
-                As = c.acquisition(X, surrogate=surrogate, maximising=self.is_maximising(), **c.acquisition_params)
-                As -= np.min(As) # shift to make 0 the worst possible value, so that at w=0, A*w is the worst possible value.
-                if prev_xy is None:
-                    return As
-                else:
-                    # calculate the tracking weights
-                    # for the input points X, calculate the tracking weight using an RBF function centered at prev_xy
-                    assert prev_xy.shape == (1, X.shape[1])
-                    rs = X - prev_xy # subtract from every row
-                    rs = np.linalg.norm(rs, axis=1) # calculate the norm of every row
-                    ws = k_RBF(rs.reshape(-1, 1), sigma=1, l=c.tracking_l)
+                X = get_X(ys)
+                res = c.acquisition(X, surrogate=surrogate,
+                                   maximising=self.is_maximising(),
+                                   return_gradient=return_gradient,
+                                   **c.acquisition_params)
+                acq, dacq_dx = res if return_gradient else (res, None)
+                # shift to make 0 the worst possible value, so that at w=0,
+                # A*w is the worst possible value.
+                # can't subtract min(acq) because ys may not be many points over the whole domain
+                acq -= worst_acq
 
-                    return As * ws
+                if prev_xy is not None: # can only weight after the first sample
+                    res = RBF_weighted(X, acq, dacq_dx, center=prev_xy, sigma=1, l=c.tracking_l)
+                    acq, dacq_dx = res if return_gradient else (res, None)
+
+                if return_gradient:
+                    dacq_dy = dacq_dx[0, -1:] # take only the derivative w.r.t y as a single-element array
+                    return acq, dacq_dy
+                else:
+                    return acq
 
             best_y, best_acq = c.aux_optimiser(acq, [self.range_bounds], **c.aux_optimiser_params)
             ys.append(np.asscalar(best_y))

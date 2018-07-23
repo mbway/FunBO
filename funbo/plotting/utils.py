@@ -8,6 +8,8 @@ import numpy as np
 import matplotlib as mpl
 import scipy.interpolate
 
+from funbo.utils import show_warnings
+
 
 def in_jupyter():
     """ whether the current script is running in IPython/Jupyter """
@@ -37,9 +39,6 @@ def multidimensional_integrate(f, domain, quiet=True):
     return result
 
 
-def show_warnings(ws):
-    for w in ws:
-        warnings.showwarning(w.message, w.category, w.filename, w.lineno)
 
 def unzip(l):
     if l:

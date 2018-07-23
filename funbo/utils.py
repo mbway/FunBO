@@ -3,6 +3,7 @@
 Utility functions and data structures
 """
 
+import warnings
 import numpy as np
 import scipy.interpolate
 
@@ -87,13 +88,31 @@ def uniform_random_in_bounds(num_samples, bounds):
         cols.append(np.random.uniform(rmin, rmax, size=(num_samples, 1)))
     return np.hstack(cols)
 
-def k_RBF(r, sigma, l):
-    """ calculate the RBF values of r with the given standard deviation of sigma and lengthscale of l
+def k_RBF(X, center, sigma, l, return_gradient=False):
+    """ calculate the RBF values of X with a given center, standard deviation and lengthscale
 
     Args:
-        r: either a scalar length or a column of lengths
+        X: the points to evaluate at (one per row)
+        center: the center of the RBF function
+        sigma: the standard deviation of the RBF function
+        l: the lengthscale of the RBF function
+        return_gradient: whether to calculate and return drbf_dx
     """
     assert np.isscalar(sigma) and np.isscalar(l)
-    assert np.isscalar(r) or r.shape[1] == 1 # either a scalar or a column of values
-    return sigma**2 * np.exp(-0.5 * np.square(r/l))
+    assert len(X.shape) == 2
+    assert center.shape == (1, X.shape[1])
+    diff = X - center # subtract from every row
+    rs = np.linalg.norm(diff, axis=1).reshape(-1, 1) # calculate the norm of every row
+    rbf = sigma**2 * np.exp(-0.5 * np.square(rs/l))
+    if return_gradient:
+        # take sigma^2 out
+        # d/dx e^x = e^x
+        # chain rule so multiply by d/dx -1/(2l^2) * (x-center)^2  =  -1/l^2 * (x-center)
+        drbf_dx = -1/(l**2) * diff * rbf
+        return rbf, drbf_dx
+    else:
+        return rbf
 
+def show_warnings(ws):
+    for w in ws:
+        warnings.showwarning(w.message, w.category, w.filename, w.lineno)
