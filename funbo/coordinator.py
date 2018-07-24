@@ -7,7 +7,7 @@ import numpy as np
 import GPy
 
 # local imports
-from .utils import FixedAttributes
+from .utils import FixedAttributes, RegularGrid
 from . import aux_optimisers
 from . import acquisition
 
@@ -102,8 +102,7 @@ class GPPriorSelectConfig(FixedAttributes):
     def __init__(self, optimiser):
         self.mu = None
         self.kernel = GPy.kern.RBF(input_dim=1, variance=1.0, lengthscale=1.0) # TODO: not multi-dimensional
-        xmin, xmax = optimiser.domain_bounds[0] # TODO: not multi dimensional
-        self.control_xs = np.linspace(xmin, xmax, num=100)
+        self.control_xs = RegularGrid(100, optimiser.domain_bounds)
         self.interpolation = 'linear'
 
 
@@ -116,9 +115,8 @@ class RandomCPSelectConfig(FixedAttributes):
     slots = ('control_xs', 'interpolation')
 
     def __init__(self, optimiser):
-        xmin, xmax = optimiser.domain_bounds[0] # TODO: not multi dimensional
-        self.control_xs = np.linspace(xmin, xmax, num=10)
-        self.interpolation = 'quadratic'
+        self.control_xs = RegularGrid(10, optimiser.domain_bounds)
+        self.interpolation = 'cubic'
 
 
 class SurrogateConfig(FixedAttributes):
@@ -151,24 +149,25 @@ class SurrogateConfig(FixedAttributes):
         )
         self.initial_hyper_params = 'last' # for hyperparameter continuity
 
+class IndependentExtractionConfig(FixedAttributes):
+    """ Extract a function from the surrogate model by maximising the
+        acquisition function at the specified control point locations. At each
+        control point, the acquisition function is maximised independently. This
+        may cause discontinuities in the function.
 
-class WeightedExtractionConfig(FixedAttributes):
-    r"""
     Attributes:
         acquisition: the acquisition function to use
         acquisition_params: additional parameters passed to the acquisition
             function such as an exploration/exploitation trade-off parameter
         aux_optimiser: the method to use when maximising the acquisition function
         aux_optimiser_params: the parameters to pass to aux_optimiser
-        tracking_l: the length scale to use in the kernel used in calculating the tracking weights
         control_xs: the x values to calculate the optimal y value and use (x,y) as a control point for the function sample
         interpolation: the interpolation to use between the control points of the extracted function
     """
     slots = (
         'acquisition', 'acquisition_params', 'aux_optimiser',
-        'aux_optimiser_params', 'tracking_l', 'control_xs', 'interpolation'
+        'aux_optimiser_params', 'control_xs', 'interpolation'
     )
-
     def __init__(self, optimiser):
         self.acquisition = acquisition.UCB
         self.acquisition_params = dict(beta=1.0)
@@ -182,9 +181,28 @@ class WeightedExtractionConfig(FixedAttributes):
             exact_gradient=False,
             quiet=True # don't show warnings
         )
-        self.tracking_l = 1.0 #TODO: might want another kernel other than RBF
-        xmin, xmax = optimiser.domain_bounds[0] # TODO: not multi dimensional
-        self.control_xs = np.linspace(xmin, xmax, num=50)
+        self.control_xs = RegularGrid(50, optimiser.domain_bounds)
         self.interpolation = 'linear'
+
+
+class WeightedExtractionConfig(IndependentExtractionConfig):
+    """ Extract a function from the surrogate model by maximising the
+        acquisition function at the specified control point locations, with the
+        acquisition function weighted to favour staying close to the adjacent
+        output values to prevent discontinuities.
+
+    Attributes:
+        tracking_l: the length scale to use in the kernel used in calculating the tracking weights
+    """
+    slots = IndependentExtractionConfig.slots + (
+        'tracking_l',
+    )
+
+    def __init__(self, optimiser):
+        super().__init__(optimiser) # see IndependentExtractionConfig for the other attributes
+
+        #TODO: tracking_ls (for multiple dimensions)
+        self.tracking_l = 1.0 #TODO: might want another kernel other than RBF
+        #TODO: growth_directions = [-1, 1, -1] etc to indicate the direction to grow along that dimension
 
 

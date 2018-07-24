@@ -51,15 +51,6 @@ def format_list(l, precision):
 
 
 
-def grid_to_points(grid):
-    ''' take a grid generated with `np.meshgrid` and return every point on that grid as a row of a matrix '''
-    # vstack then transpose is different to just hstack because the stacking behaves differently because of the shape
-    return np.vstack((grid[0].ravel(), grid[1].ravel())).T
-
-def points_to_grid(points, grid):
-    ''' take a matrix of points generated with grid_to_points and return it to a grid'''
-    return points.reshape(*grid[0].shape)
-
 def get_reward_cmap(values, minimising):
     # the reward stays blue for the first half then begins changing to red
     cs = [(0, 0, 1.0), (0, 0, 0.9), (1.0, 0, 0)]

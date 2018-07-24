@@ -8,7 +8,7 @@ from collections import namedtuple
 import warnings
 
 # local imports
-from .utils import FixedAttributes, PiecewiseFunction, k_RBF, show_warnings
+from .utils import FixedAttributes, InterpolatedFunction, k_RBF, show_warnings
 from .acquisition import RBF_weighted
 from .coordinator import *
 
@@ -92,16 +92,20 @@ class Optimiser(FixedAttributes):
         return inc_i, inc
 
 
+    ################################
+    # Random Selection
+    ################################
+
     def select_random_CP(self, c):
         """ Sample a function using random control points for a piecewise function
 
         The difference between this function and select_GP_prior is that each
         control point here is independent.
         """
-        assert isinstance(c, RandomCPSelectConfig)
-        ys = [np.random.uniform(*self.range_bounds) for _ in c.control_xs]
-        return PiecewiseFunction(c.control_xs, ys, interpolation=c.interpolation,
-                                 clip_range=self.range_bounds if self.clip_range else None)
+        assert type(c) is RandomCPSelectConfig
+        ys = [np.random.uniform(*self.range_bounds) for _ in range(len(c.control_xs))]
+        return InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
+                                    clip_range=self.range_bounds if self.clip_range else None)
 
     def select_GP_prior(self, c):
         """ Sample a function from a GP prior using the given mean function and kernel
@@ -112,29 +116,65 @@ class Optimiser(FixedAttributes):
         Returns:
             a function which can be evaluated anywhere in the domain
         """
-        assert isinstance(c, GPPriorSelectConfig)
-        xs = c.control_xs.reshape(-1, 1) # points to sample at
+        assert type(c) is GPPriorSelectConfig
+        xs = c.control_xs.get_points()
         # mean function
         mus = np.zeros(len(xs)) if c.mu is None else np.array([c.mu(np.asscalar(x)) for x in xs])
         # covariance matrix
         C = c.kernel.K(xs, xs)
-        ys = np.random.multivariate_normal(mean=mus, cov=C, size=1)
-        return PiecewiseFunction(xs.flatten(), ys.flatten(), interpolation=c.interpolation,
-                                 clip_range=self.range_bounds if self.clip_range else None)
+        ys = np.random.multivariate_normal(mean=mus, cov=C, size=1).reshape(-1, 1)
+        return InterpolatedFunction(xs, ys, interpolation=c.interpolation,
+                                    clip_range=self.range_bounds if self.clip_range else None)
+
+
+    ################################
+    # Function Extraction
+    ################################
+
+    def extract_function(self, surrogate, c):
+        """ extract a function from the given surrogate using the given configuration """
+        if type(c) is IndependentExtractionConfig:
+            return self.independent_function_extraction(surrogate, c)
+        elif type(c) is WeightedExtractionConfig:
+            return self.weighted_function_extraction(surrogate, c)
+        else:
+            raise ValueError(c)
+
+
+    def _points_along_y(self, x, ys):
+        """ get the points [(x, y) for y in ys] as rows """
+        assert len(x.shape) == len(ys.shape) == 2
+        assert x.shape[0] == 1 and ys.shape[1] == 1
+        xs = np.repeat(x.reshape(1, -1), ys.shape[0], axis=0) # stack copies of x as rows
+        return np.hstack((xs, ys))
+
+
+    def independent_function_extraction(self, surrogate, c):
+        assert type(c) is IndependentExtractionConfig
+        ys =[]
+        for x in c.control_xs:
+            def acq(ys, return_gradient=False):
+                X = self._points_along_y(x, ys)
+                return c.acquisition(X, surrogate=surrogate,
+                                   maximising=self.is_maximising(),
+                                   return_gradient=return_gradient,
+                                   **c.acquisition_params)
+
+            best_y, best_acq = c.aux_optimiser(acq, [self.range_bounds], **c.aux_optimiser_params)
+            ys.append(np.asscalar(best_y))
+
+        ys = np.array(ys).reshape(-1, 1)
+        return InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
+                                    clip_range=self.range_bounds if self.clip_range else None)
 
 
     def weighted_function_extraction(self, surrogate, c):
-        assert isinstance(c, WeightedExtractionConfig)
+        assert type(c) is WeightedExtractionConfig
         ys = []
         prev_xy = None
         for x in c.control_xs:
 
-            def get_X(ys):
-                xs = np.repeat(x.reshape(1, -1), ys.shape[0], axis=0) # stack copies of x as rows
-                X = np.hstack((xs, ys))
-                return X
-
-            X = get_X(np.linspace(*self.range_bounds, num=500).reshape(-1, 1))
+            X = self._points_along_y(x, np.linspace(*self.range_bounds, num=1000).reshape(-1, 1))
             worst_acq = np.min(c.acquisition(X, surrogate=surrogate,
                                              maximising=self.is_maximising(),
                                              **c.acquisition_params))
@@ -143,7 +183,7 @@ class Optimiser(FixedAttributes):
                 """ with x fixed, given ys as rows calculate the weighted
                 acquisition function for the pairs of x and y
                 """
-                X = get_X(ys)
+                X = self._points_along_y(x, ys)
                 res = c.acquisition(X, surrogate=surrogate,
                                    maximising=self.is_maximising(),
                                    return_gradient=return_gradient,
@@ -154,6 +194,7 @@ class Optimiser(FixedAttributes):
                 # can't subtract min(acq) because ys may not be many points over the whole domain
                 acq -= worst_acq
 
+                #TODO: rather than prev_xy, need get_adjacent() or similar to cope with multiple dimensions
                 if prev_xy is not None: # can only weight after the first sample
                     res = RBF_weighted(X, acq, dacq_dx, center=prev_xy, sigma=1, l=c.tracking_l)
                     acq, dacq_dx = res if return_gradient else (res, None)
@@ -168,8 +209,14 @@ class Optimiser(FixedAttributes):
             ys.append(np.asscalar(best_y))
             prev_xy = np.append(x, best_y).reshape(1, -1)
 
-        return PiecewiseFunction(c.control_xs, ys, interpolation=c.interpolation,
-                                 clip_range=self.range_bounds if self.clip_range else None)
+        ys = np.array(ys).reshape(-1, 1)
+        return InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
+                                    clip_range=self.range_bounds if self.clip_range else None)
+
+
+    ################################
+    # Fitting Surrogate
+    ################################
 
     def fit_surrogate(self, data, c):
         """ fit a surrogate model to the given data
@@ -178,7 +225,7 @@ class Optimiser(FixedAttributes):
             data: (input, output) for the surrogate to fit to
             c (SurrogateConfig): the configuration for the surrogate
         """
-        assert isinstance(c, SurrogateConfig)
+        assert type(c) is SurrogateConfig
 
         # don't initialise the model until the initial hyperparameters have been set
         # will always raise RuntimeWarning("Don't forget to initialize by self.initialize_parameter()!")
@@ -223,13 +270,17 @@ class Optimiser(FixedAttributes):
 
         return surrogate
 
+    ################################
+    # Bayes Selection
+    ################################
+
     def select_bayes(self, c, timings):
         """
         Args:
             c (BayesSelectConfig): the configuration for the selection
             timings (Trial.TimingInfo): an object to fill out the relevant timing info
         """
-        assert isinstance(c, BayesSelectConfig)
+        assert type(c) is BayesSelectConfig
 
         X = [] # (x, y)
         R_l = [] # R_l(x,y)
@@ -249,13 +300,10 @@ class Optimiser(FixedAttributes):
 
         return f, surrogate
 
-    def extract_function(self, surrogate, c):
-        """ extract a function from the given surrogate using the given configuration
-        """
-        if isinstance(c, WeightedExtractionConfig):
-            return self.weighted_function_extraction(surrogate, c)
-        else:
-            raise ValueError(c)
+
+    ################################
+    # Bayesian Optimisation Algorithm
+    ################################
 
     def select(self, c, timings):
         """ Select a function using the given configuration
@@ -264,13 +312,13 @@ class Optimiser(FixedAttributes):
             timings (Trial.TimingInfo): an object to fill out the relevant timing info
         """
         timer = time.perf_counter()
-        if isinstance(c, RandomCPSelectConfig):
+        if type(c) is RandomCPSelectConfig:
             f = self.select_random_CP(c)
             surrogate = None
-        elif isinstance(c, GPPriorSelectConfig):
+        elif type(c) is GPPriorSelectConfig:
             f = self.select_GP_prior(c)
             surrogate = None
-        elif isinstance(c, BayesSelectConfig):
+        elif type(c) is BayesSelectConfig:
             f, surrogate = self.select_bayes(c, timings)
         else:
             raise ValueError(c)

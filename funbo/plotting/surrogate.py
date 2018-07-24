@@ -2,6 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+from funbo.utils import *
 from .utils import *
 from .trials import plot_trials
 
@@ -78,7 +79,7 @@ def plot_surrogate(optimiser, surrogate, ylim=None, midpoint_fraction=None):
 
     grid = np.meshgrid(xs, ys)
     mus_points, var_points = surrogate.predict(grid_to_points(grid))
-    mus_grid = points_to_grid(mus_points, grid)
+    mus_grid = points_to_grid(mus_points, grid[0].shape)
 
     cmap = 'viridis' if optimiser.is_maximising() else 'viridis_r'
     if midpoint_fraction is None:
@@ -139,5 +140,41 @@ def plot_surrogate_3D(optimiser, surrogate, show_var=True, flip_z=False):
         )
     )
     fig = go.Figure(data=data, layout=layout)
+    ply.iplot(fig, show_link=False)
+
+
+def surface_3D(x, y, z, tooltips=None, axes_names=('x','y','z')):
+    '''plot a 3D surface using plotly
+
+    Parameters should be of the form:
+    ```
+    X = np.arange(...)
+    Y = np.arange(...)
+    X, Y = np.meshgrid(X, Y)
+    Z = f(X,Y)
+    ```
+
+    Args:
+        tooltips: an array with the same length as the number of points,
+            containing a string to display beside them
+    '''
+    data = [go.Surface(
+        x=x, y=y, z=z,
+        text=tooltips, colorscale='Viridis', opacity=1
+    )]
+    layout = go.Layout(
+        title='3D surface',
+        autosize=False,
+        width=900,
+        height=600,
+        margin=dict(l=0, r=0, b=0, t=0),
+        scene=dict(
+            xaxis=dict(title=axes_names[0]),
+            yaxis=dict(title=axes_names[1]),
+            zaxis=dict(title=axes_names[2])
+        )
+    )
+    fig = go.Figure(data=data, layout=layout)
+    # show_link is a link to export to the 'plotly cloud'
     ply.iplot(fig, show_link=False)
 
