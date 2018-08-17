@@ -56,9 +56,12 @@ def plot_surrogate_with_trials(optimiser, trial_num, true_best=None, ylim=None, 
     plot_trials(optimiser, optimiser.trials[:trial_num+1], true_best, color_by_reward=False, ax=fig.axes[0])
     return fig
 
-def plot_surrogate(optimiser, surrogate, ylim=None, midpoint_fraction=None):
+def plot_surrogate(optimiser, surrogate, ylim=None, midpoint_fraction=None, fig_ax=None):
     assert surrogate is not None, 'no surrogate'
-    fig, ax = plt.subplots(figsize=(20, 10))
+    if fig_ax is None:
+        fig, ax = plt.subplots(figsize=(20, 10))
+    else:
+        fig, ax = fig_ax
     # undo seaborn styling
     ax.grid(False)
     ax.set_facecolor((1, 1, 1))
@@ -79,7 +82,7 @@ def plot_surrogate(optimiser, surrogate, ylim=None, midpoint_fraction=None):
 
     grid = np.meshgrid(xs, ys)
     mus_points, var_points = surrogate.predict(grid_to_points(grid))
-    mus_grid = points_to_grid(mus_points, grid[0].shape)
+    mus_grid = vals_to_grid(mus_points, grid[0].shape)
 
     cmap = 'viridis' if optimiser.is_maximising() else 'viridis_r'
     if midpoint_fraction is None:
@@ -108,8 +111,9 @@ def plot_surrogate_3D(optimiser, surrogate, show_var=True, flip_z=False):
     ys = np.linspace(ymin-y_margin, ymax+y_margin, num=100)
 
     grid = np.meshgrid(xs, ys)
+    grid_shape = grid[0].shape
     mus_points, var_points = surrogate.predict(grid_to_points(grid))
-    mus_grid = points_to_grid(mus_points, grid)
+    mus_grid = vals_to_grid(mus_points, grid_shape)
     if flip_z:
         mus_grid = -mus_grid
 
@@ -117,7 +121,7 @@ def plot_surrogate_3D(optimiser, surrogate, show_var=True, flip_z=False):
         go.Surface(x=grid[0], y=grid[1], z=mus_grid, colorscale='Viridis', reversescale=optimiser.is_minimising() != flip_z),
     ]
     if show_var:
-        sig_grid = points_to_grid(np.sqrt(np.clip(var_points, 0, np.inf)), grid)
+        sig_grid = vals_to_grid(np.sqrt(np.clip(var_points, 0, np.inf)), grid_shape)
         n_sig = 2
         color_row = ['#0000ff'] * grid[0].shape[1]
         colors = [color_row] * grid[0].shape[0]

@@ -8,6 +8,14 @@ import warnings
 # local imports
 from funbo import utils
 
+def fun(X):
+    """ a function defined in any dimension which returns a very
+    different value for every input point to catch cases where
+    coordinates are the wrong way round etc.
+    """
+    return np.array([hash(tuple(x.flatten().tolist())) for x in X]).reshape(-1, 1)
+
+
 class TestUtils(unittest.TestCase):
     def test_rbf(self):
         """ test k_RBF against the GPy RBF implementation """
@@ -64,6 +72,20 @@ class TestUtils(unittest.TestCase):
             self.assertTrue(-2 <= r[0] <= -1.5)
             self.assertTrue(3 <= r[1] <= 3.1)
 
+    def test_meshgrid(self):
+
+        for e in ('little', 'big'):
+            gs = np.meshgrid([1,2], [3,4,5])
+            new_gs = [utils.vals_to_grid(utils.grid_to_points(gs, endian=e)[:,i], gs[0].shape, endian=e) for i in range(len(gs))]
+            self.assertTrue(np.allclose(gs, new_gs))
+
+        for e in ('little', 'big'):
+            gs = np.meshgrid([1,2], [3,4,5], [9, 10, 11, 12])
+            new_gs = [utils.vals_to_grid(utils.grid_to_points(gs, endian=e)[:,i], gs[0].shape, endian=e) for i in range(len(gs))]
+            self.assertTrue(np.allclose(gs, new_gs))
+
+
+
     def test_grid(self):
         self.assertRaises(AssertionError, utils.Grid, [])
         self.assertRaises(AssertionError, utils.Grid, [[1]], [0])
@@ -71,7 +93,7 @@ class TestUtils(unittest.TestCase):
         self.assertRaises(AssertionError, utils.Grid, [[1], [1,2]], [1,1,1])
         self.assertRaises(AssertionError, utils.Grid, [[1]], [])
 
-        g = utils.Grid([[1], [1,2]])
+        g = utils.Grid([[1], [1,2]], traverse_order='big')
         ps = np.array([
             [1, 1],
             [1, 2]
@@ -84,7 +106,7 @@ class TestUtils(unittest.TestCase):
         self.assertTrue(np.allclose(g.subgrid((1,)).get_points(), np.array([[1],[2]])))
         self.assertTrue(np.allclose(np.meshgrid([1], [1,2]), g.meshgrid()))
 
-        g = utils.Grid([[1], [1,2]], [-1, -1])
+        g = utils.Grid([[1], [1,2]], [-1, -1], traverse_order='big')
         ps = np.array([
             [1, 2],
             [1, 1]
@@ -97,7 +119,7 @@ class TestUtils(unittest.TestCase):
         self.assertTrue(np.allclose(g.subgrid((1,)).get_points(), np.array([[2],[1]])))
         self.assertTrue(np.allclose(np.meshgrid([1], [1,2]), g.meshgrid()))
 
-        g = utils.Grid([[1,5], [1,2], [-10, 10]], [1, -1, 1])
+        g = utils.Grid([[1,5], [1,2], [-10, 10]], [1, -1, 1], traverse_order='big')
         ps = np.array([
             [1, 2, -10],
             [1, 2, 10],
@@ -113,9 +135,9 @@ class TestUtils(unittest.TestCase):
         self.assertTrue(np.allclose(np.vstack(p for p in g), ps))
         self.assertTrue(np.allclose(np.meshgrid([1,5], [1,2], [-10,10], indexing='xy'), g.meshgrid()))
         self.assertTrue(np.allclose(np.meshgrid([1,5], [1,2], [-10,10], indexing='ij'), g.meshgrid(cartesian_index=False)))
-        self.assertTrue(np.allclose(g.subgrid((0,1)).get_points(), utils.Grid([[1,5], [1,2]], [1,-1]).get_points()))
-        self.assertTrue(np.allclose(g.subgrid((0,2)).get_points(), utils.Grid([[1,5], [-10,10]], [1,1]).get_points()))
-        self.assertTrue(np.allclose(g.subgrid((1,2)).get_points(), utils.Grid([[1,2], [-10,10]], [-1,1]).get_points()))
+        self.assertTrue(np.allclose(g.subgrid((0,1)).get_points(), utils.Grid([[1,5], [1,2]], [1,-1], traverse_order='big').get_points()))
+        self.assertTrue(np.allclose(g.subgrid((0,2)).get_points(), utils.Grid([[1,5], [-10,10]], [1,1], traverse_order='big').get_points()))
+        self.assertTrue(np.allclose(g.subgrid((1,2)).get_points(), utils.Grid([[1,2], [-10,10]], [-1,1], traverse_order='big').get_points()))
 
         ps = np.array([
             [1,6.5,-10],
@@ -130,17 +152,53 @@ class TestUtils(unittest.TestCase):
         ])
         self.assertTrue(np.allclose(g.fixed_subgrid([None, 6.5, 3]).get_points(), ps))
 
-        g2 = utils.Grid([[1,2], [-10, 10]], [-1, 1])
+        g2 = utils.Grid([[1,2], [-10, 10]], [-1, 1], traverse_order='big')
         self.assertTrue(np.allclose(g.subgrid((1,2)).get_points(), g2.get_points()))
         self.assertTrue(np.allclose(np.meshgrid([1,2], [-10,10]), g2.meshgrid()))
 
-        g = utils.Grid([[1,2,9], [-10, 0.5, 10]], [1,1])
+        g = utils.Grid([[1,2,9], [-10, 0.5, 10]], [1,1], traverse_order='big')
         self.assertTrue(np.allclose(np.meshgrid([1,2,9], [-10,0.5,10], indexing='xy'), g.meshgrid()))
         self.assertTrue(np.allclose(np.meshgrid([1,2,9], [-10,0.5,10], indexing='ij'), g.meshgrid(cartesian_index=False)))
 
-        g = utils.Grid([[1,2,9], [-10, 0.5, 10]], [-1,-1])
+        g = utils.Grid([[1,2,9], [-10, 0.5, 10]], [-1,-1], traverse_order='big')
         self.assertTrue(np.allclose(np.meshgrid([1,2,9], [-10,0.5,10], indexing='xy'), g.meshgrid()))
         self.assertTrue(np.allclose(np.meshgrid([1,2,9], [-10,0.5,10], indexing='ij'), g.meshgrid(cartesian_index=False)))
+
+        g = utils.Grid([[1,2,9], [-10, 0.5, 10]], [1,1], traverse_order='little')
+        self.assertTrue(np.allclose(g.get_points(), utils.grid_to_points(g.meshgrid(), endian='little')))
+
+        g = utils.Grid([[1,2,9], [-10, 0.5, 10]], [1,1], traverse_order='big')
+        self.assertTrue(np.allclose(g.get_points(), utils.grid_to_points(g.meshgrid(), endian='big')))
+
+        def check_fun_on_grid(data, g, f):
+            self.assertEqual(data.shape, tuple(g.num_values))
+            for n in range(g.num_points):
+                c = g._get_nth_coord(n)
+                self.assertEqual(data[tuple(c)], f(g._get_point(c)))
+
+        g = utils.Grid([[1,2,9], [-10, 0.5, 10]])
+        check_fun_on_grid(g.fun_on_grid(fun), g, fun)
+
+        g = utils.Grid([[1,2,9], [-10, 0.5, 10]], [-1,1], traverse_order='little')
+        check_fun_on_grid(g.fun_on_grid(fun), g, fun)
+
+        g = utils.Grid([[1,2,9], [-10, 0.5, 10]], [-1,1], traverse_order='big')
+        check_fun_on_grid(g.fun_on_grid(fun), g, fun)
+
+        grid = g.meshgrid(cartesian_index=False)
+        grid_data = utils.vals_to_grid(fun(utils.grid_to_points(grid)), grid[0].shape)
+        self.assertTrue(np.allclose(grid_data, g.fun_on_grid(fun)))
+
+        g = utils.Grid([[1,2,9], [-10, 0.5, 10], [7,8]], [-1,1,1], traverse_order='little')
+        check_fun_on_grid(g.fun_on_grid(fun), g, fun)
+
+        g = utils.Grid([[1,2,9], [-10, 0.5, 10], [7,8]], [-1,1,1], traverse_order='big')
+        check_fun_on_grid(g.fun_on_grid(fun), g, fun)
+
+        grid = g.meshgrid(cartesian_index=False)
+        grid_data = utils.vals_to_grid(fun(utils.grid_to_points(grid)), grid[0].shape)
+        self.assertTrue(np.allclose(grid_data, g.fun_on_grid(fun)))
+
 
 
 

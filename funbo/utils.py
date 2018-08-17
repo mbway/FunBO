@@ -6,6 +6,7 @@ Utility functions and data structures
 import warnings
 import numpy as np
 import scipy.interpolate
+import time
 
 class FixedAttributes:
     """ Prevent assignment to attributes other than those defined in the class
@@ -60,22 +61,49 @@ class InterpolatedFunction:
                 value), or None to allow any output value.
         """
         if isinstance(control_xs, Grid):
-            control_xs = control_xs.get_points()
-        assert len(control_xs.shape) == 2 and control_xs.shape[0] > 1
-        assert control_ys.shape == (control_xs.shape[0], 1)
-        self.control_xs = control_xs
+            self.control_xs = control_xs.get_points()
+        else:
+            assert len(control_xs.shape) == 2 and control_xs.shape[0] > 1
+            self.control_xs = control_xs
+        assert control_ys.shape == (self.control_xs.shape[0], 1)
         self.control_ys = control_ys
         self.interpolation = interpolation
+        # note: control_ys may be outside of clip_range however it is probably
+        # better to just leave that and only clip the function output.
         self.clip_range = clip_range
-        if clip_range is not None:
-            assert all(clip_range[0] <= y <= clip_range[1] for y in self.control_ys)
 
         # more interpolation options in 1D. Construct the interpolated function
         # once here rather than every evaluation.
+        # implementation similar to scipy.interpolate.griddata, except that
+        # function constructs the interpolated function for every query.
         if self.control_xs.shape[1] == 1: # one dimensional
             # additional interpolation methods are supported in one dimension
             # bounds_error=False to instead fill values with nan, which is then detected afterwards
-            self.f1D = scipy.interpolate.interp1d(self.control_xs.flatten(), self.control_ys.flatten(), kind=self.interpolation, bounds_error=False)
+            # note: requires self.control_xs to be sorted, which Grid already ensures
+            self.f = scipy.interpolate.interp1d(self.control_xs.flatten(), self.control_ys.flatten(), kind=self.interpolation, bounds_error=False, fill_value=np.nan)
+
+        elif isinstance(control_xs, Grid) and self.interpolation in ('linear', 'nearest'):
+            # if the points are defined on a grid (even with uneven spacing) then this interpolation will be applicable and more efficient
+            if any(d != 1 for d in control_xs.traverse_directions) or control_xs.endianness != 'big':
+                raise NotImplementedError('control_xs must be a big endian grid with all +1 traverse directions')
+            # see Grid.fun_on_grid
+            ys = self.control_ys.reshape(control_xs.num_values)
+            self.f = scipy.interpolate.RegularGridInterpolator(control_xs.values, ys, method=self.interpolation, bounds_error=False, fill_value=np.nan)
+        else:
+            # 'unstructured data' interpolation methods
+            warnings.warn('warning: since control_xs is not defined on a regular grid, using less efficient interpolation methods.')
+
+            if self.interpolation == 'nearest':
+                self.f = scipy.interpolate.NearestNDInterpolator(self.control_xs, self.control_ys, bounds_error=False, fill_value=np.nan, rescale=False)
+            elif self.interpolation == 'linear':
+                self.f = scipy.interpolate.LinearNDInterpolator(self.control_xs, self.control_ys, fill_value=np.nan, rescale=False)
+            elif self.interpolation == 'cubic' and self.control_xs.shape[1] == 2: # two dimensional
+                self.f = scipy.interpolate.CloughTocher2DInterpolator(self.control_xs, self.control_ys, fill_value=np.nan, rescale=False)
+            elif self.interpolation == 'rbf':
+                # scipy.interpolate.Rbf
+                raise NotImplemented() # might be interesting
+            else:
+                raise ValueError()
 
     def __call__(self, X):
         """ Evaluate the interpolated function at the given points
@@ -88,18 +116,13 @@ class InterpolatedFunction:
             the interpolated function values corresponding to X. If X is a
             single point then the result is a scalar, otherwise an (N,1) array
         """
-        one_dim = self.control_xs.shape[1] == 1 # some things handled specially in one dimension
-        if one_dim and np.isscalar(X):
-            X = np.array([[X]])
+        if self.control_xs.shape[1] == 1: # one dimensional
+            X = np.array([[X]]) if np.isscalar(X) else np.asarray(X)
         else:
             X = np.asarray(X)
         assert len(X.shape) == 2 and X.shape[1] == self.control_xs.shape[1]
 
-        if one_dim:
-            # additional interpolation methods are supported in one dimension
-            Y = self.f1D(X.flatten()).reshape(-1, 1)
-        else:
-            Y = scipy.interpolate.griddata(self.control_xs, self.control_ys, X, method=self.interpolation, rescale=False)
+        Y = self.f(X).reshape(-1, 1)
 
         nans = X[np.argwhere(np.isnan(Y.flatten()))]
         if nans.size > 0:
@@ -124,14 +147,24 @@ def uniform_random_in_bounds(num_samples, bounds):
     return np.hstack(cols)
 
 
-def grid_to_points(grid):
+def grid_to_points(grid, endian='big'):
     ''' take a grid generated with `np.meshgrid` and return every point on that grid as a row of a matrix '''
     # vstack then transpose is different to just hstack because the stacking behaves differently because of the shape
-    return np.vstack((grid[0].ravel(), grid[1].ravel())).T
+    if endian == 'big':
+        return np.vstack([g.T.ravel() for g in grid]).T
+    elif endian == 'little':
+        return np.vstack([g.ravel() for g in grid]).T
+    else:
+        raise ValueError(endian)
 
-def points_to_grid(points, grid_shape):
-    ''' take a matrix of points generated with grid_to_points and return it to a grid'''
-    return points.reshape(*grid_shape)
+def vals_to_grid(vals, grid_shape, endian='big'):
+    ''' take a matrix of values generated with grid_to_points and return it to a grid'''
+    if endian == 'big':
+        return vals.reshape(*reversed(grid_shape)).T
+    elif endian == 'little':
+        return vals.reshape(*grid_shape)
+    else:
+        raise ValueError(endian)
 
 def fill_meshgrid(grids, f):
     G = np.empty_like(grids[0])
@@ -146,7 +179,7 @@ class Grid:
     the order specified by `traverse_directions`.
     """
 
-    def __init__(self, values, traverse_directions=None):
+    def __init__(self, values, traverse_directions=None, traverse_order='big'):
         """
         Args:
             values: a list where each element is a list of possible values along
@@ -154,6 +187,13 @@ class Grid:
             traverse_directions: a list of either -1 or 1 to indicate the
                 direction that that dimension should be traversed when iterating
                 over the grid. 1 => ascending, -1 => descending.
+            traverse_order: a list of dimension indices to designate which
+                dimensions are the 'least significant' and which are the 'most
+                significant', to use the analogy with digits of a number.
+                Earlier in the list => less significant.
+                special values:
+                'little' => range(dims) => little endian (first dimension is least significant)
+                'big' => reversed(range(dims)) => big endian (first dimension is most significant)
         """
         # the possible values along each dimension
         self.values = values
@@ -161,10 +201,26 @@ class Grid:
         self.num_values = [len(vs) for vs in values]
         self.num_points = np.prod(self.num_values)
         self.traverse_directions = [1]*self.dims if traverse_directions is None else traverse_directions
+        self.traverse_order = self._get_traverse_order(traverse_order)
+        self.endianness = traverse_order if traverse_order in ('little', 'big') else None
         assert self.dims > 0
         assert all(n > 0 for n in self.num_values)
-        assert len(self.traverse_directions) == self.dims
+        assert all(np.all(np.diff(vals) > 0) for vals in self.values) # values are strictly increasing
+        assert len(self.traverse_directions) == len(self.traverse_order) == self.dims
+        assert len(self.traverse_order) == len(set(self.traverse_order)) # no duplicates
+        assert all([0 <= i < self.dims for i in self.traverse_order])
         assert all([d in (-1, 1) for d in self.traverse_directions])
+
+    def _get_traverse_order(self, order):
+        if order is None or order == 'big':
+            return list(reversed(range(self.dims)))
+        elif order == 'little':
+            return list(range(self.dims))
+        elif isinstance(order, (np.ndarray, list)):
+            return order
+        else:
+            raise ValueError(order)
+
 
     class Iterator:
         def __init__(self, grid):
@@ -198,12 +254,14 @@ class Grid:
         """
         # traverse the grid with each dimension acting like a digit in a number
         assert 0 <= n < self.num_points
-        coord = []
-        for n_vals, direction in zip(reversed(self.num_values), reversed(self.traverse_directions)):
+        coord = [0] * self.dims
+        # traverse from the least significant 'digit' to the most significant
+        for d in self.traverse_order:
+            n_vals, direction = self.num_values[d], self.traverse_directions[d]
             n, i = divmod(n, n_vals)
             if direction == -1:
                 i = n_vals - i - 1 # if tracking from the larger end, index into c from that end
-            coord.insert(0, i) # prepend because building the coordinate from the 'least significant digit'
+            coord[d] = i
         assert n == 0
         return coord
 
@@ -239,7 +297,7 @@ class Grid:
         """
         assert len(point) == self.dims
         values = [vals if point[d] is None else [point[d]] for d, vals in enumerate(self.values)]
-        return Grid(values, self.traverse_directions)
+        return Grid(values, self.traverse_directions, self.traverse_order)
 
 
     def subgrid(self, keep_dims):
@@ -248,13 +306,14 @@ class Grid:
         Useful for plotting some dimensions while leaving most at a fixed value
 
         Args:
-            keep_dims: a set or list of dimension _numbers_ (i.e. indices into
+            keep_dims: a list of dimension _numbers_ (i.e. indices into
                 self.values) to keep.
         """
         assert len(keep_dims) > 0 and all(0 <= d < self.dims for d in keep_dims)
         values = [vals for d, vals in enumerate(self.values) if d in keep_dims]
         traverse_directions = [direction for d, direction in enumerate(self.traverse_directions) if d in keep_dims]
-        return Grid(values, traverse_directions)
+        traverse_order = [keep_dims.index(d) for d in self.traverse_order if d in keep_dims]
+        return Grid(values, traverse_directions, traverse_order)
 
     def meshgrid(self, cartesian_index=True):
         """ return a list of grids like the ones created by `np.meshgrid`
@@ -290,9 +349,23 @@ class Grid:
             grids.append(g)
         return grids
 
+    def fun_on_grid(self, f):
+        """ return an array of values such that `data[i,j,k,...] = f(_get_point([i,j,k,...]))`
+
+        The following holds:
+        ```
+        g = Grid(...)
+        grids = g.meshgrid(cartesian_index=False)
+        grid.fun_on_grid(f) == points_to_grid(f(grid_to_points(grids)), grids[0].shape)
+        ```
+        """
+        g = Grid(self.values, traverse_directions=[1]*self.dims, traverse_order='big')
+        data = f(g.get_points())
+        return data.reshape(g.num_values) # num_values is a list of the number of values along each dimension
+
 
 class RegularGrid(Grid):
-    def __init__(self, num_values, bounds, traverse_directions=None):
+    def __init__(self, num_values, bounds, traverse_directions=None, traverse_order='big'):
         """
         Args:
             num_values: a list of the number of possible values in each
@@ -301,12 +374,13 @@ class RegularGrid(Grid):
             traverse_directions: a list of either -1 or 1 to indicate the
                 direction that that dimension should be traversed when iterating
                 over the grid. 1 => ascending, -1 => descending.
+            traverse_order: see Grid.traverse_order
         """
         num_values = [num_values] * len(bounds) if np.isscalar(num_values) else num_values
         assert len(num_values) == len(bounds)
         # the possible values along each dimension
         values = [np.linspace(rmin, rmax, num=n) for n, (rmin, rmax) in zip(num_values, bounds)]
-        super().__init__(values, traverse_directions)
+        super().__init__(values, traverse_directions, traverse_order)
 
 
 
@@ -338,3 +412,13 @@ def k_RBF(X, center, sigma, l, return_gradient=False):
 def show_warnings(ws):
     for w in ws:
         warnings.showwarning(w.message, w.category, w.filename, w.lineno)
+
+class Timer:
+    """ A small utility for accurately timing sections of code with the minimal
+    amount of clutter. Simply instantiate then call `stop()` to get the elapsed
+    duration in seconds.
+    """
+    def __init__(self):
+        self.start = time.perf_counter()
+    def stop(self):
+        return time.perf_counter() - self.start

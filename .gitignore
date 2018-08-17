@@ -1,3 +1,5 @@
 __pycache__
 *.swp
 .ipynb_checkpoints
+screenshots
+funbo/distributed_gp

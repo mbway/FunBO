@@ -1,0 +1,4 @@
+#!/bin/bash
+
+grep -rin TODO --include \*.py --color
+

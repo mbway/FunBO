@@ -5,10 +5,9 @@ import numpy as np
 import scipy
 import GPy
 from collections import namedtuple
-import warnings
 
 # local imports
-from .utils import FixedAttributes, InterpolatedFunction, k_RBF, show_warnings
+from .utils import FixedAttributes, InterpolatedFunction, Timer, uniform_random_in_bounds
 from .acquisition import RBF_weighted
 from .coordinator import *
 
@@ -17,21 +16,68 @@ class Trial(FixedAttributes):
     """ Holds data for a single trial/iteration of the optimiser
 
     Attributes:
-        user_info: optional data returned from the objective function
     """
-    slots = ('trial_num', 'config', 'f', 'R_ls', 'R_g', 'surrogate', 'user_info', 'timing_info')
+    slots = ('trial_num', 'config', 'f', 'R_ls', 'R_g', 'surrogate', 'duration', 'selection', 'evaluation')
 
-    class TimingInfo(FixedAttributes):
-        """
-        realistically, total should equal selection + evaluation and selection
-        should equal fitting + extraction, but there may by some extra
-        computation which takes some time.
+    def is_bayes(self):
+        return type(self.config) == BayesSelectConfig
 
-        fitting and extraction may be None if the trial was not Bayes selected
+    class SelectionInfo(FixedAttributes):
         """
-        slots = ('total', 'selection', 'fitting', 'extraction', 'evaluation')
+        Attributes:
+            duration: the time taken to select the function
+            fitting_info: a FittingInfo instance. None if randomly selected
+            extraction_info: an ExtractionInfo instance. None if randomly selected
+        """
+        slots = ('duration', 'fitting', 'extraction')
+        def __init__(self, duration, fitting_info, extraction_info):
+            self.duration = duration
+            self.fitting = fitting_info
+            self.extraction = extraction_info
+
+    class FittingInfo(FixedAttributes):
+        """
+        Attributes:
+            duration: the time taken to fit the surrogate model
+            data_set_size: the number of samples the surrogate used as training data
+        """
+        slots = ('duration', 'data_set_size')
+        def __init__(self, duration, data_set_size):
+            self.duration = duration
+            self.data_set_size = data_set_size
+
+    class ExtractionInfo(FixedAttributes):
+        """
+        Attributes:
+            duration: the time taken to extract the function
+            acq_evals: the number of points the acquisition function was queried
+                at during the extraction
+            acq_gradient_evals: the number of points the acquisition gradient
+                was analytically computed at during the extraction
+            acq_total_time: the total amount of time spent querying the
+                acquisition function during the extraction
+        """
+        slots = ('duration', 'acq_evals', 'acq_gradient_evals', 'acq_total_time')
         def __init__(self):
-            self._null_init() # set everything to None
+            self.duration = 0
+            self.acq_evals = 0
+            self.acq_gradient_evals = 0
+            self.acq_total_time = 0
+
+        def get_overhead_duration(self):
+            return self.duration - self.acq_total_time
+
+    class EvaluationInfo(FixedAttributes):
+        """
+        Attributes:
+            duration: the time taken to evaluate the function
+            user_info: optional data returned from the objective function
+        """
+        slots = ('duration', 'user_info')
+        def __init__(self, duration, user_info):
+            self.duration = duration
+            self.user_info = user_info
+
 
 
 
@@ -58,7 +104,7 @@ class Optimiser(FixedAttributes):
 
         # separate the names and bounds because usually only the bounds are required
         self.domain_names = [b[0] for b in domain_bounds]
-        self.domain_bounds = [(b[1], b[2]) for b in domain_bounds] # TODO: wrap in turbo bounds
+        self.domain_bounds = [(b[1], b[2]) for b in domain_bounds]
         assert all(b[0] < b[1] for b in self.domain_bounds)
 
         #TODO: maybe support optional range_name by passing (name, ymin, ymax) as range_bounds
@@ -103,9 +149,12 @@ class Optimiser(FixedAttributes):
         control point here is independent.
         """
         assert type(c) is RandomCPSelectConfig
-        ys = [np.random.uniform(*self.range_bounds) for _ in range(len(c.control_xs))]
-        return InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
+        t = Timer()
+        ys = np.array([np.random.uniform(*self.range_bounds) for _ in range(len(c.control_xs))]).reshape(-1, 1)
+        f = InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
                                     clip_range=self.range_bounds if self.clip_range else None)
+        selection_info = Trial.SelectionInfo(t.stop(), fitting_info=None, extraction_info=None)
+        return (f, selection_info)
 
     def select_GP_prior(self, c):
         """ Sample a function from a GP prior using the given mean function and kernel
@@ -117,14 +166,17 @@ class Optimiser(FixedAttributes):
             a function which can be evaluated anywhere in the domain
         """
         assert type(c) is GPPriorSelectConfig
+        t = Timer()
         xs = c.control_xs.get_points()
         # mean function
         mus = np.zeros(len(xs)) if c.mu is None else np.array([c.mu(np.asscalar(x)) for x in xs])
         # covariance matrix
         C = c.kernel.K(xs, xs)
         ys = np.random.multivariate_normal(mean=mus, cov=C, size=1).reshape(-1, 1)
-        return InterpolatedFunction(xs, ys, interpolation=c.interpolation,
+        f = InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
                                     clip_range=self.range_bounds if self.clip_range else None)
+        selection_info = Trial.SelectionInfo(t.stop(), fitting_info=None, extraction_info=None)
+        return (f, selection_info)
 
 
     ################################
@@ -135,6 +187,8 @@ class Optimiser(FixedAttributes):
         """ extract a function from the given surrogate using the given configuration """
         if type(c) is IndependentExtractionConfig:
             return self.independent_function_extraction(surrogate, c)
+        elif type(c) is IndependentIndividualExtractionConfig:
+            return self.independent_individual_function_extraction(surrogate, c)
         elif type(c) is WeightedExtractionConfig:
             return self.weighted_function_extraction(surrogate, c)
         else:
@@ -150,31 +204,102 @@ class Optimiser(FixedAttributes):
 
 
     def independent_function_extraction(self, surrogate, c):
+        """ independent function extraction
+
+        This method is better performing than the 'individual' variant of this
+        method because this combines all queries together into a single large
+        query. This method exploits the fact that at each control point there is
+        a relatively simple 1D optimisation problem which can be approximately
+        solved with a reasonable number of samples and doesn't require a local
+        optimisation method to solve.
+        """
         assert type(c) is IndependentExtractionConfig
-        ys =[]
+        t = Timer()
+        extraction_info = Trial.ExtractionInfo()
+
+        if c.sample_distribution == 'linear':
+            test_ys = np.linspace(*self.range_bounds, num=c.samples_per_cp).reshape(-1, 1)
+        elif c.sample_distribution == 'random':
+            test_ys = uniform_random_in_bounds(c.samples_per_cp, [self.range_bounds])
+        else:
+            raise ValueError(c.sample_distribution)
+
+        X = np.vstack(self._points_along_y(x, test_ys) for x in c.control_xs)
+        extraction_info.acq_evals += X.shape[0]
+        t_acq = Timer()
+        acq = c.acquisition(X, surrogate=surrogate,
+                           maximising=self.is_maximising(),
+                           return_gradient=False, **c.acquisition_params)
+        extraction_info.acq_total_time = t_acq.stop()
+        ys = []
+        for i in range(len(c.control_xs)):
+            best_y = test_ys[np.argmax(acq[i*c.samples_per_cp : (i+1)*c.samples_per_cp])]
+            ys.append(best_y)
+
+        ys = np.array(ys).reshape(-1, 1)
+        f = InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
+                                    clip_range=self.range_bounds if self.clip_range else None)
+        extraction_info.duration = t.stop()
+        return (f, extraction_info)
+
+
+    def independent_individual_function_extraction(self, surrogate, c):
+        """ independent and individual function extraction
+
+        similar to weighted_function_extraction, this method simply maximises
+        the acquisition function at each control point without any weighting
+        """
+        assert type(c) is IndependentIndividualExtractionConfig
+        ys = []
+        t = Timer()
+        extraction_info = Trial.ExtractionInfo()
+
         for x in c.control_xs:
             def acq(ys, return_gradient=False):
                 X = self._points_along_y(x, ys)
-                return c.acquisition(X, surrogate=surrogate,
+                extraction_info.acq_evals += X.shape[0]
+                extraction_info.acq_gradient_evals += X.shape[0] if return_gradient else 0
+                t = Timer()
+                res = c.acquisition(X, surrogate=surrogate,
                                    maximising=self.is_maximising(),
                                    return_gradient=return_gradient,
                                    **c.acquisition_params)
+                extraction_info.acq_total_time += t.stop()
+                return res
 
             best_y, best_acq = c.aux_optimiser(acq, [self.range_bounds], **c.aux_optimiser_params)
             ys.append(np.asscalar(best_y))
 
         ys = np.array(ys).reshape(-1, 1)
-        return InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
+        f = InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
                                     clip_range=self.range_bounds if self.clip_range else None)
+        extraction_info.duration = t.stop()
+        return (f, extraction_info)
 
 
     def weighted_function_extraction(self, surrogate, c):
+        """
+        Weighted Extraction:
+            a hyperplane sweeps through the function input space along the given
+            direction and control points are chosen based on maximising an
+            acquisition function which is weighted to bias towards the output
+            values of the points adjacent to the current point which are behind
+            the frontier of the hyperplane.
+
+            This is achieved by a product of experts approach where one expert
+            is the acquisition function and another simply wants to stay close
+            to previous values by an RBF function centered at the previous
+            values.
+        """
         assert type(c) is WeightedExtractionConfig
+        assert len(self.domain_bounds) == 1 # TODO: support multiple dimensions
         ys = []
         prev_xy = None
+        t = Timer()
+        extraction_info = Trial.ExtractionInfo()
         for x in c.control_xs:
 
-            X = self._points_along_y(x, np.linspace(*self.range_bounds, num=1000).reshape(-1, 1))
+            X = self._points_along_y(x, np.linspace(*self.range_bounds, num=200).reshape(-1, 1))
             worst_acq = np.min(c.acquisition(X, surrogate=surrogate,
                                              maximising=self.is_maximising(),
                                              **c.acquisition_params))
@@ -184,10 +309,14 @@ class Optimiser(FixedAttributes):
                 acquisition function for the pairs of x and y
                 """
                 X = self._points_along_y(x, ys)
+                extraction_info.acq_evals += X.shape[0]
+                extraction_info.acq_gradient_evals += X.shape[0] if return_gradient else 0
+                t = Timer()
                 res = c.acquisition(X, surrogate=surrogate,
                                    maximising=self.is_maximising(),
                                    return_gradient=return_gradient,
                                    **c.acquisition_params)
+                extraction_info.acq_total_time += t.stop()
                 acq, dacq_dx = res if return_gradient else (res, None)
                 # shift to make 0 the worst possible value, so that at w=0,
                 # A*w is the worst possible value.
@@ -210,146 +339,135 @@ class Optimiser(FixedAttributes):
             prev_xy = np.append(x, best_y).reshape(1, -1)
 
         ys = np.array(ys).reshape(-1, 1)
-        return InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
+        f = InterpolatedFunction(c.control_xs, ys, interpolation=c.interpolation,
                                     clip_range=self.range_bounds if self.clip_range else None)
+        extraction_info.duration = t.stop()
+        return (f, extraction_info)
 
 
     ################################
     # Fitting Surrogate
     ################################
 
-    def fit_surrogate(self, data, c):
-        """ fit a surrogate model to the given data
+    def surrogate_dimensionality(self):
+        return len(self.domain_bounds) + 1
 
-        Args:
-            data: (input, output) for the surrogate to fit to
-            c (SurrogateConfig): the configuration for the surrogate
+    def num_available_training_points(self):
+        """ the number of training points available for fitting the surrogate
+        model. If resampling is used then not all of these points may be used.
         """
-        assert type(c) is SurrogateConfig
+        return sum(len(t.R_ls) for t in self.trials)
 
-        # don't initialise the model until the initial hyperparameters have been set
-        # will always raise RuntimeWarning("Don't forget to initialize by self.initialize_parameter()!")
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', '.*initialize_parameter.*')
-            surrogate = c.model_class(data[0], data[1], initialize=False, **c.init_params)
-
-        # these steps for initialising a model from stored parameters are from https://github.com/SheffieldML/GPy
-        surrogate.update_model(False)  # prevents the GP from fitting to the data until we are ready to enable it manually
-        surrogate.initialize_parameter()  # initialises the hyperparameter objects
-
-        if c.initial_hyper_params is None:
-            surrogate.randomize()
-
-        elif c.initial_hyper_params == 'last':
-            # hyperparameter continuity, use the previous model's hyperparameters as a starting point
-            last_params = None
-            for t in reversed(self.trials):
-                if t.surrogate is not None:
-                    last_params = t.surrogate[:]
-                    break
-
-            if last_params is None:
-                surrogate.randomize()
-            else:
-                surrogate[:] = last_params
-        else:
-            surrogate[:] = c.initial_hyper_params
-
-        surrogate.update_model(True)
-
-        # the current parameters are used as one of the starting locations (as of the time of writing)
-        # https://github.com/sods/paramz/blob/master/paramz/model.py
-        with warnings.catch_warnings(record=True) as ws:
-            # num_restarts is actually the number of iterations
-            r = c.optimise_params.get('num_restarts', None)
-            if r is None or r > 0:
-                surrogate.optimize_restarts(**c.optimise_params)
-
-        if c.optimise_params.get('verbose'):
-            show_warnings(ws)
-
-        return surrogate
-
-    ################################
-    # Bayes Selection
-    ################################
-
-    def select_bayes(self, c, timings):
-        """
-        Args:
-            c (BayesSelectConfig): the configuration for the selection
-            timings (Trial.TimingInfo): an object to fill out the relevant timing info
-        """
+    def get_training_data(self, c):
         assert type(c) is BayesSelectConfig
 
         X = [] # (x, y)
         R_l = [] # R_l(x,y)
         for t in self.trials:
-            X += [(x, t.f(x)) for x, r in t.R_ls] # TODO: probably won't work with multiple dimensions in x
+            X += [np.append(x, t.f(x)) for x, r in t.R_ls]
             R_l += [r for x, r in t.R_ls]
         X = np.array(X)
         R_l = np.array(R_l).reshape(-1, 1)
 
-        timer = time.perf_counter()
-        surrogate = self.fit_surrogate((X, R_l), c.surrogate_config)
-        timings.fitting = time.perf_counter()-timer
+        # resample
+        if c.resample_method is None or c.resample_num == -1 or X.shape[0] <= c.resample_num:
+            pass # do not resample
+        elif c.resample_method == 'random':
+            ids = np.random.permutation(np.arange(X.shape[0]))[:c.resample_num]
+            X, R_l = X[ids], R_l[ids]
+            assert X.shape[0] == R_l.shape[0] == c.resample_num
+        else:
+            raise ValueError(c.resample_method)
 
-        timer = time.perf_counter()
-        f = self.extract_function(surrogate, c.extraction_config)
-        timings.extraction = time.perf_counter()-timer
+        return X, R_l
 
-        return f, surrogate
+    def fit_surrogate(self, c):
+        """ gather the training data and fit a surrogate model to it
+
+        Args:
+            c (BayesSelectConfig): the configuration for the Bayesian trial
+        """
+        assert type(c) is BayesSelectConfig
+        timer = Timer()
+        X, R_l = self.get_training_data(c)
+
+        if c.initial_hyper_params == 'last':
+            # hyperparameter continuity, use the previous model's hyperparameters as a starting point
+            last_params = None
+            for t in reversed(self.trials):
+                if t.surrogate is not None:
+                    last_params = t.surrogate.get_hyper_params()
+                    break
+            initial_hyper_params = last_params # may be None if this is the first Bayesian trial
+        else:
+            initial_hyper_params = c.initial_hyper_params # either None or an arbitrary set of parameters
+
+        surrogate = c.surrogate
+        surrogate.fit(X, R_l, initial_hyper_params)
+        fitting_info = Trial.FittingInfo(timer.stop(), data_set_size=X.shape[0])
+        return surrogate, fitting_info
+
+    ################################
+    # Bayes Selection
+    ################################
+
+    def select_bayes(self, c):
+        """
+        Args:
+            c (BayesSelectConfig): the configuration for the selection
+        """
+        assert type(c) is BayesSelectConfig
+        t = Timer()
+        surrogate, fitting_info = self.fit_surrogate(c)
+        f, extraction_info = self.extract_function(surrogate, c.extraction_config)
+        selection_info = Trial.SelectionInfo(t.stop(), fitting_info, extraction_info)
+        return f, surrogate, selection_info
 
 
     ################################
     # Bayesian Optimisation Algorithm
     ################################
 
-    def select(self, c, timings):
+    def select(self, c):
         """ Select a function using the given configuration
         Args:
             c: the configuration to use for selection
-            timings (Trial.TimingInfo): an object to fill out the relevant timing info
         """
-        timer = time.perf_counter()
         if type(c) is RandomCPSelectConfig:
-            f = self.select_random_CP(c)
+            f, selection_info = self.select_random_CP(c)
             surrogate = None
         elif type(c) is GPPriorSelectConfig:
-            f = self.select_GP_prior(c)
+            f, selection_info = self.select_GP_prior(c)
             surrogate = None
         elif type(c) is BayesSelectConfig:
-            f, surrogate = self.select_bayes(c, timings)
+            f, surrogate, selection_info = self.select_bayes(c)
         else:
             raise ValueError(c)
 
-        timings.selection = time.perf_counter() - timer
-        return f, surrogate
+        return f, surrogate, selection_info
 
 
     def run(self, coordinator, quiet=False):
+        #TODO: rather than taking the OOP approach, could just have this as a stand-alone function and return the list of trials
         assert not self.has_run, 'optimiser already run'
         self.has_run = True
 
-        start = time.time()
+        coordinator.register_optimiser(self)
+        timer = Timer()
         trial_num = 0
         while True:
             if not quiet:
                 print('trial {}/{}'.format(trial_num+1, coordinator.get_max_trials() or '?'))
-
-            timings = Trial.TimingInfo()
-            trial_start = time.perf_counter()
+            trial_timer = Timer()
 
             c = coordinator.get_config(trial_num)
             if c is None:
                 break # finished
 
-            f, surrogate = self.select(c, timings)
+            f, surrogate, selection_info = self.select(c)
 
-            eval_start = time.perf_counter()
+            eval_timer = Timer()
             res = self.objective(f)
-            timings.evaluation = time.perf_counter() - eval_start
-
             if len(res) == 2:
                 R_ls, R_g = res
                 user_info = None
@@ -357,11 +475,11 @@ class Optimiser(FixedAttributes):
                 R_ls, R_g, user_info = res
             else:
                 raise ValueError('wrong number of values ({}) returned from objective function'.format(len(res)))
+            evaluation_info = Trial.EvaluationInfo(eval_timer.stop(), user_info)
 
-            timings.total = time.perf_counter()-trial_start
-            t = Trial(trial_num, c, f, R_ls, R_g, surrogate, user_info, timings)
+            t = Trial(trial_num, c, f, R_ls, R_g, surrogate, trial_timer.stop(), selection_info, evaluation_info)
             self.trials.append(t)
             trial_num += 1
 
-        print('optimisation finished: {} trials in {:.1f} seconds'.format(trial_num, time.time()-start))
+        print('optimisation finished: {} trials in {:.1f} seconds'.format(trial_num, timer.stop()))
 

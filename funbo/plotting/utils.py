@@ -32,8 +32,11 @@ def integrate(f, domain, intervals=100):
     return scipy.integrate.simps(y=ys, x=xs)
 
 def multidimensional_integrate(f, domain, quiet=True):
+    def g(*args):
+        return f(np.array([args]))
     with warnings.catch_warnings(record=True) as ws:
-        result, abserr = scipy.integrate.nquad(func=f, ranges=domain, opts=dict(limit=80, epsabs=1e-4, epsrel=1e-4))
+        # default limit is 50
+        result, abserr = scipy.integrate.nquad(func=g, ranges=domain, opts=dict(limit=80, epsabs=1e-4, epsrel=1e-4))
     if not quiet:
         show_warnings(ws)
     return result

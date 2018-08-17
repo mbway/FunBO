@@ -17,13 +17,8 @@ def UCB(X, beta, surrogate, maximising, return_gradient=False):
         surrogate: the surrogate model to use for predictions
         maximising: whether the optimiser is maximising or minimising (minimising => -LCB rather than UCB)
     """
-    assert len(X.shape) == 2
-
-    # full_cov: whether to return the full covariance matrix or just the diagonal
-    mu, var = surrogate.predict(X, full_cov=False)
-    assert mu.shape == var.shape == (X.shape[0], 1) # (input_rows, outputs)
-
-    sigma = np.sqrt(np.clip(var, 1e-10, np.inf)) # ensure no negative variance
+    mu, var = surrogate.predict(X) # both have shapes == (input_rows, 1)
+    sigma = np.sqrt(var)
 
     sf = 1 if maximising else -1 # scale factor
     # in this form it is clearer that the value is the negative LCB when minimising
@@ -33,12 +28,7 @@ def UCB(X, beta, surrogate, maximising, return_gradient=False):
     if not return_gradient:
         return acq
     else:
-        dmu_dx, dvar_dx = surrogate.predictive_gradients(X)
-        assert dmu_dx.shape == (X.shape[0], X.shape[1], 1) # (input_rows, input_cols, outputs)
-        assert dvar_dx.shape == X.shape # all outputs have the same variance
-
-        dmu_dx = dmu_dx[:, :, 0] # take only the first output
-        assert dmu_dx.shape == X.shape
+        dmu_dx, dvar_dx = surrogate.predict_gradients(X) # both have shapes == X.shape
 
         # sigma must be strictly > 0 for this, which has been ensured earlier
         #

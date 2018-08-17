@@ -10,6 +10,7 @@ import GPy
 from .utils import FixedAttributes, RegularGrid
 from . import aux_optimisers
 from . import acquisition
+from .surrogates import GPySurrogate
 
 
 
@@ -22,7 +23,11 @@ class CoordinatorBase:
     """
     def get_max_trials(self):
         """ return the maximum number of trials (can return None if unknown) """
-        raise NotImplemented()
+        raise NotImplementedError()
+
+    def register_optimiser(self, optimiser):
+        """ called when the coordinator is first used by an optimiser, before any calls to `get_config` """
+        raise NotImplementedError()
 
     def get_config(self, trial_num):
         """ get the selection configuration for this trial
@@ -33,7 +38,7 @@ class CoordinatorBase:
             GPPriorSelectConfig => perform a random selection with the given configuration
             BayesSelectConfig => perform a Bayesian selection with the given configuration
         """
-        raise NotImplemented()
+        raise NotImplementedError()
 
 
 class Coordinator(CoordinatorBase):
@@ -41,10 +46,14 @@ class Coordinator(CoordinatorBase):
     pre_phase trials, then switching to Bayesian optimisation trials for a set
     number of trials.
     """
-    def __init__(self, optimiser, pre_phase_trials, max_trials):
-        self.optimiser = optimiser
+    def __init__(self, pre_phase_trials, max_trials):
+        assert pre_phase_trials > 0 and max_trials >= pre_phase_trials
+        self.optimiser = None
         self.pre_phase_trials = pre_phase_trials
         self.max_trials = max_trials
+
+    def register_optimiser(self, optimiser):
+        self.optimiser = optimiser
 
     def get_max_trials(self):
         """ return the maximum number of trials (can return None if unknown) """
@@ -76,13 +85,40 @@ class Coordinator(CoordinatorBase):
 class BayesSelectConfig(FixedAttributes):
     r"""
     Attributes:
-        surrogate_config: the configuration for fitting the surrogate model
+        surrogate: the `Surrogate` instance to use for the trial
+        initial_hyper_params: The starting point for surrogate hyperparameter
+            optimisation. Used for hyperparameter continuity.
+            None => start from a random location.
+            'last' => use the hyperparameters of the last surrogate as a
+                starting point (if there is no previous model then start randomly).
+            array => use these hyperparameters as a starting point.
+        resample_method: the method to use for resampling the training data set
+            for the surrogate model. None to disable. 'random' to sample points
+            randomly without replacement. Creates a 'subset of data (SoD)'
+            approximation to a full GP.
+        resample_num: when resample_method is not None, gives the number of
+            points to keep in the training data set for the surrogate model.
         extraction_config: the configuration for extracting a function from the surrogate
     """
-    slots = ('surrogate_config', 'extraction_config')
+    slots = ('surrogate', 'initial_hyper_params', 'resample_method', 'resample_num', 'extraction_config')
 
     def __init__(self, optimiser):
-        self.surrogate_config = SurrogateConfig(optimiser)
+        self.surrogate = GPySurrogate(
+            init_params=dict(
+                kernel=GPy.kern.RBF(input_dim=optimiser.surrogate_dimensionality(), ARD=False),
+                normalizer=True
+            ),
+            optimise_params=dict(
+                parallel=False, # not usable with SparseGPRegression, useless if num_restarts == 1
+                num_processes=None, # None => equal to the number of cores
+                verbose=False,
+                num_restarts=1 # actually the number of iterations
+            ),
+            sparse=False
+        )
+        self.initial_hyper_params = 'last' # for hyperparameter continuity
+        self.resample_method = None
+        self.resample_num = -1
         self.extraction_config = WeightedExtractionConfig(optimiser)
 
 
@@ -95,14 +131,14 @@ class GPPriorSelectConfig(FixedAttributes):
         kernel: the kernel for the Gaussian process prior which is sampled
             from. The type of kernel and its parameters greatly affect the
             behaviour of the sample function.
-        control_xs
+        control_xs: the `x` positions of the control points
     """
     slots = ('mu', 'kernel', 'control_xs', 'interpolation')
 
     def __init__(self, optimiser):
         self.mu = None
-        self.kernel = GPy.kern.RBF(input_dim=1, variance=1.0, lengthscale=1.0) # TODO: not multi-dimensional
-        self.control_xs = RegularGrid(100, optimiser.domain_bounds)
+        self.kernel = GPy.kern.RBF(input_dim=len(optimiser.domain_bounds), variance=1.0, lengthscale=1.0)
+        self.control_xs = RegularGrid(20, optimiser.domain_bounds)
         self.interpolation = 'linear'
 
 
@@ -116,76 +152,83 @@ class RandomCPSelectConfig(FixedAttributes):
 
     def __init__(self, optimiser):
         self.control_xs = RegularGrid(10, optimiser.domain_bounds)
-        self.interpolation = 'cubic'
+        self.interpolation = 'linear'
 
 
-class SurrogateConfig(FixedAttributes):
-    r"""
-    Attributes:
-        model_class: the class to use as the surrogate model, eg `GPy.models.(GPRegression|SparseGPRegression)`
-        init_params: the parameters to pass to the constructor of surrogate_class (see GPy documentation)
-        optimise_params: the parameters to pass to optimize_restarts (see paramz documentation)
-        initial_hyper_params: The starting point for surrogate hyperparameter
-            optimisation. Used for hyperparameter continuity.
-            None => start from a random location.
-            'last' => use the hyperparameters of the last surrogate as a
-                starting point (if there is no previous model then start randomly).
-            array => use these hyperparameters as a starting point.
-    """
-    slots = ('model_class', 'init_params', 'optimise_params', 'initial_hyper_params')
-
-    def __init__(self, optimiser):
-        self.model_class = GPy.models.GPRegression
-        #TODO: thin wrapper around GPy
-        self.init_params = dict(
-            kernel=GPy.kern.RBF(input_dim=2, ARD=True), # TODO: not multi-dimensional
-            normalizer=True
-        )
-        self.optimise_params = dict(
-            parallel=True, # not usable with SparseGPRegression
-            num_processes=None, # => equal to the number of cores
-            verbose=False,
-            num_restarts=10 # actually the number of iterations
-        )
-        self.initial_hyper_params = 'last' # for hyperparameter continuity
-
-class IndependentExtractionConfig(FixedAttributes):
-    """ Extract a function from the surrogate model by maximising the
-        acquisition function at the specified control point locations. At each
-        control point, the acquisition function is maximised independently. This
-        may cause discontinuities in the function.
+class ExtractionBase(FixedAttributes):
+    """ the attributes shared between all function extraction methods
 
     Attributes:
         acquisition: the acquisition function to use
         acquisition_params: additional parameters passed to the acquisition
             function such as an exploration/exploitation trade-off parameter
-        aux_optimiser: the method to use when maximising the acquisition function
-        aux_optimiser_params: the parameters to pass to aux_optimiser
-        control_xs: the x values to calculate the optimal y value and use (x,y) as a control point for the function sample
-        interpolation: the interpolation to use between the control points of the extracted function
+        control_xs: the x values to calculate the optimal y value and use (x,y)
+            as a control point for the function sample
+        interpolation: the interpolation to use between the control points of
+            the extracted function
     """
     slots = (
-        'acquisition', 'acquisition_params', 'aux_optimiser',
-        'aux_optimiser_params', 'control_xs', 'interpolation'
+        'acquisition', 'acquisition_params',
+        'control_xs', 'interpolation'
     )
     def __init__(self, optimiser):
         self.acquisition = acquisition.UCB
         self.acquisition_params = dict(beta=1.0)
-        self.aux_optimiser = aux_optimisers.maximise_random_quasi_Newton
-        self.aux_optimiser_params = dict(
-            num_random=10_000,
-            # since extraction consists of many 'easy' 1D optimisations, BFGS is
-            # only needed to slightly tweak the best random result.
-            num_take_random=1,
-            num_bfgs=1,
-            exact_gradient=False,
-            quiet=True # don't show warnings
-        )
         self.control_xs = RegularGrid(50, optimiser.domain_bounds)
         self.interpolation = 'linear'
 
+class IndependentExtractionConfig(ExtractionBase):
+    """ Extract a function from the surrogate model by maximising the
+        acquisition function at the specified control point locations.
+        Every control point is optimised at the same time by combining queries
+        of the acquisition function together. This is done for performance reasons.
 
-class WeightedExtractionConfig(IndependentExtractionConfig):
+    Attributes:
+        samples_per_cp: the number of different y values to try for each control point
+        sample_distribution: how to choose the y values to try ('random' or 'linear')
+    """
+    slots = ExtractionBase.slots + ('samples_per_cp', 'sample_distribution')
+    def __init__(self, optimiser):
+        super().__init__(optimiser) # see ExtractionBase for the other attributes
+        self.samples_per_cp = 100
+        # anecdotally, linear tends to be a bit smoother
+        self.sample_distribution = 'linear' # one of 'random', 'linear'
+        #TODO: method = 'random' | 'gradient descent'
+
+class IndependentIndividualExtractionConfig(ExtractionBase):
+    """ Extract a function from the surrogate model by maximising the
+        acquisition function at the specified control point locations. At each
+        control point, the acquisition function is maximised independently. This
+        may cause discontinuities in the function.
+
+    Unlike IndependentExtractionConfig, this method is slightly different in
+    that it treats each control point as a separate optimisation problem,
+    however this has a large (~10x) performance impact.
+
+    Attributes:
+        aux_optimiser: the local optimisation method to use when maximising the acquisition function
+        aux_optimiser_params: the parameters to pass to aux_optimiser
+    """
+    slots = ExtractionBase.slots + ('aux_optimiser', 'aux_optimiser_params')
+    def __init__(self, optimiser):
+        super().__init__(optimiser) # see ExtractionBase for the other attributes
+        # because the auxiliary optimiser is only ever optimising along a single
+        # dimension at a time, a reasonable number of random samples should be
+        # sufficient. BFGS is inadvisable due to the large overhead from
+        # querying a GP one point at a time.
+        self.aux_optimiser = aux_optimisers.maximise_random_quasi_Newton
+        self.aux_optimiser_params = dict(
+            num_random=200,
+            # since extraction consists of many 'easy' 1D optimisations, BFGS is
+            # only needed to slightly tweak the best random result.
+            num_take_random=1,
+            num_bfgs=0,
+            exact_gradient=False,
+            quiet=True # don't show warnings
+        )
+
+
+class WeightedExtractionConfig(ExtractionBase):
     """ Extract a function from the surrogate model by maximising the
         acquisition function at the specified control point locations, with the
         acquisition function weighted to favour staying close to the adjacent
@@ -193,16 +236,36 @@ class WeightedExtractionConfig(IndependentExtractionConfig):
 
     Attributes:
         tracking_l: the length scale to use in the kernel used in calculating the tracking weights
+        aux_optimiser: the local optimisation method to use when maximising the acquisition function
+        aux_optimiser_params: the parameters to pass to aux_optimiser
     """
-    slots = IndependentExtractionConfig.slots + (
-        'tracking_l',
+    slots = ExtractionBase.slots + (
+        'aux_optimiser', 'aux_optimiser_params', 'tracking_l', 'sweep_direction'
     )
 
     def __init__(self, optimiser):
-        super().__init__(optimiser) # see IndependentExtractionConfig for the other attributes
+        super().__init__(optimiser) # see ExtractionBase for the other attributes
+
+        # because the auxiliary optimiser is only ever optimising along a single
+        # dimension at a time, a reasonable number of random samples should be
+        # sufficient. BFGS is inadvisable due to the large overhead from
+        # querying a GP one point at a time.
+        self.aux_optimiser = aux_optimisers.maximise_random_quasi_Newton
+        self.aux_optimiser_params = dict(
+            num_random=200,
+            # since extraction consists of many 'easy' 1D optimisations, BFGS is
+            # only needed to slightly tweak the best random result.
+            num_take_random=1,
+            num_bfgs=0,
+            exact_gradient=False,
+            quiet=True # don't show warnings
+        )
 
         #TODO: tracking_ls (for multiple dimensions)
         self.tracking_l = 1.0 #TODO: might want another kernel other than RBF
         #TODO: growth_directions = [-1, 1, -1] etc to indicate the direction to grow along that dimension
+        self.sweep_direction = np.zeros(len(optimiser.domain_bounds))
+        self.sweep_direction[0] = 1
+
 
 
