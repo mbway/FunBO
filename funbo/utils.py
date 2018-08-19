@@ -198,7 +198,7 @@ class Grid:
         # the possible values along each dimension
         self.values = values
         self.dims = len(values)
-        self.num_values = [len(vs) for vs in values]
+        self.num_values = tuple(len(vs) for vs in values)
         self.num_points = np.prod(self.num_values)
         self.traverse_directions = [1]*self.dims if traverse_directions is None else traverse_directions
         self.traverse_order = self._get_traverse_order(traverse_order)

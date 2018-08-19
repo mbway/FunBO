@@ -227,6 +227,16 @@ class IndependentIndividualExtractionConfig(ExtractionBase):
             quiet=True # don't show warnings
         )
 
+class ElasticExtractionConfig(ExtractionBase):
+    """ TODO
+    """
+    slots = ExtractionBase.slots + ('elastic_stiffness', 'neighbourhood_radius')
+    def __init__(self, optimiser):
+        super().__init__(optimiser) # see ExtractionBase for the other attributes
+        self.elastic_stiffness = 1
+        self.neighbourhood_radius = 1
+        self.neighbourhood_distribution = 'uniform'
+
 
 class WeightedExtractionConfig(ExtractionBase):
     """ Extract a function from the surrogate model by maximising the

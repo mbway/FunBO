@@ -27,3 +27,15 @@ it appears that querying the acquisition function at a single point has a lot of
 querying the analytical gradient of the GP is approximately 3x slower than querying the GP normally, but this is probably better than approximating numerically.
     - To approximate the gradient at x requires an evaluation at x, then D more evaluations by perturbing each dimension of x, so D+1 evaluations where D is the number of dimensions.
     - in addition, the queries used to approximate the gradient are made individually, which has huge overhead (as discussed above)
+
+Thoughts on elastic extraction
+    - from Wikipedia: "For problems where finding an approximate global optimum is more important than finding a precise local optimum in a fixed amount of time, simulated annealing may be preferable to alternatives such as gradient descent."
+        - the problem I am dealing with is indeed of this kind, so I will focus on simulated annealing rather than gradient descent
+    - since optimising the output values at each control point is a very high dimensional problem I think it is justified to perturb a small subset of the dimensions at once, so that the solution improves 
+        - since the reward for the function fit is independent at each control point, the 'valleys' of the objective function are axis-aligned, the 'handbook of global optimization' discusses the challenge with simulated annealing where anisotropic perturbations should be made if the direction to the global optimum is diagonal.
+            - for my problem, picking a random subset of dimensions to perturb while leaving the others constant seems like a valid approach
+        - with the addition of the elastic energy there is a little correlation, but it should be fine
+        - to minimise the number of GP queries, could perturb every dimension and query the acquisition function at the new values, but then propose them in several updates of a few dimensions being changed at a time rather than all together.
+        - Siarry et al., 1997 used this approach
+
+

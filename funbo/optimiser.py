@@ -276,6 +276,13 @@ class Optimiser(FixedAttributes):
         extraction_info.duration = t.stop()
         return (f, extraction_info)
 
+    def elastic_function_extraction(self, surrogate, c):
+        """ elastic function extraction
+        
+        """
+        assert type(c) is ElasticExtractionConfig
+        #TODO
+
 
     def weighted_function_extraction(self, surrogate, c):
         """
