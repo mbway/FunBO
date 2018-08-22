@@ -100,7 +100,7 @@ def maximise_quasi_Newton(f, bounds, exact_gradient, starting_point):
         return x, y
 
 
-def maximise_local_restarts(f, bounds, num_its, num_take, exact_gradient, starting_points=None, method=maximise_quasi_Newton):
+def maximise_local_restarts(f, bounds, num_its, num_take, exact_gradient, starting_points=None, local_search=maximise_quasi_Newton):
     """ maximise the given function using a local optimisation method with a number of restarts
 
     Args:
@@ -116,7 +116,7 @@ def maximise_local_restarts(f, bounds, num_its, num_take, exact_gradient, starti
             approximated numerically.
         starting_points: provide starting points for the maximisation to start
             at, one per row. None => use `num_its` uniform random starting points
-        method: a function such as `maximise_quasi_Newton`. Must have the signature:
+        local_search: a function such as `maximise_quasi_Newton`. Must have the signature:
             (f, bounds, exact_gradient, starting_point) -> (x, y)
 
     Returns:
@@ -136,7 +136,7 @@ def maximise_local_restarts(f, bounds, num_its, num_take, exact_gradient, starti
     xs = []
     ys = []
     for i in range(num_its):
-        x, y = maximise_quasi_Newton(f, bounds, exact_gradient, starting_points[i].reshape(1, -1))
+        x, y = local_search(f, bounds, exact_gradient, starting_points[i].reshape(1, -1))
         if x is None:
             warnings.warn('iteration {}/{} of optimisation failed'.format(i+1, num_its))
         else:
@@ -160,3 +160,58 @@ def take_n_largest_y(xs, ys, num_take):
     take_ids = best_ids[:num_take]
     return xs[take_ids], ys[take_ids]
 
+
+
+def gradient_descent(cost_gradient, initial_state, max_its, step_size,
+                     bounds=None, adaptive=True, record_state=False):
+    """ Gradient descent optimisation
+
+    Args:
+        cost_gradient: the gradient of the cost function to minimise, takes a
+            state tensor and returns a gradient tensor with the same dimensions
+        initial_state: the state to begin optimising from, can be a vector,
+            matrix or tensor.
+        max_its: the maximum number of iterations to perform
+        step_size: the step size / learning rate for the algorithm. Can be a
+            function of the iteration number or a constant scalar. Note that if
+            adaptive=True then this value is scaled automatically but the
+            user-supplied value still has an effect.
+        bounds: (min, max) bounds applied to every element of the state
+        adaptive: False => standard gradient descent, True => Adagrad
+        record_state: whether to record the state after each iteration, this can
+            be used for later plotting.
+    """
+    state = initial_state
+    if record_state:
+        state_record = [initial_state.copy()]
+
+    # using Adagrad since it is relatively simple and should provide some
+    # improvement. The downside of adagrad is that G is strictly increasing and
+    # so the step size gradually decays to 0. This may not be a problem here
+    # though, because the number of iterations is small, and because of the
+    # neighbouring vertices sometimes want to step in the opposite direction,
+    # causing oscillations. Preventing these oscillations from exploding may be
+    # beneficial.
+    if adaptive:
+        # G[index] = sum of squared past gradients w.r.t state[index]
+        # since this implementation isn't limited to the 'state' being a vector
+        G = np.zeros_like(initial_state)
+        eps = 1e-8 # to prevent divide-by-zero
+
+    for i in range(max_its):
+        s_i = step_size(i) if callable(step_size) else step_size
+        gradient = cost_gradient(state)
+        assert gradient.shape == state.shape
+        if adaptive:
+            G += np.square(gradient)
+            # element-wise multiplication
+            state -= np.multiply(s_i/np.sqrt(G+eps), gradient)
+        else:
+            state -= s_i * gradient
+        if bounds is not None:
+            np.clip(state, *bounds)
+
+        if record_state:
+            state_record.append(state.copy())
+
+    return (state, state_record) if record_state else state

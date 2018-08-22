@@ -39,8 +39,8 @@ class TestUtils(unittest.TestCase):
                 var = 4*np.abs(np.sin(X))
                 return mu, var
 
-            def predictive_gradients(self, X):
-                dmu_dx = (X-2).reshape((X.shape[0], X.shape[1], 1))
+            def predict_gradients(self, X):
+                dmu_dx = (X-2).reshape((X.shape[0], X.shape[1]))
                 # d_dx(|x|) = x/|x|
                 # cos(x)sin(x)=sin(2x)/2
                 abs_s = np.clip(np.abs(np.sin(X)), 1e-10, np.inf)
@@ -57,7 +57,7 @@ class TestUtils(unittest.TestCase):
                 var = np.clip(var, 1e-10, np.inf)
                 return -(mu - beta * np.sqrt(var))
 
-        plot = True
+        plot = False
 
         s = DummySurrogate()
         beta = 1
@@ -68,7 +68,7 @@ class TestUtils(unittest.TestCase):
 
         mu, var = s.predict(X)
         var = np.sqrt(np.clip(var, 1e-10, np.inf))
-        dmu_dx, dvar_dx = s.predictive_gradients(X)
+        dmu_dx, dvar_dx = s.predict_gradients(X)
         truth_ucb, truth_lcb = s.UCB(X, beta), s.negLCB(X, beta)
 
         #center = np.array([[-0.5]])
@@ -98,11 +98,13 @@ class TestUtils(unittest.TestCase):
 
             fig.tight_layout()
             plt.show()
+        else:
+            print('plotting disabled')
 
 
         # check that the surrogate mean and variance gradients are correct
         single_val = lambda x, i: np.asscalar(s.predict(np.array([[x]]))[i])
-        single_dval = lambda x, i: np.asscalar(s.predictive_gradients(np.array([[x]]))[i])
+        single_dval = lambda x, i: np.asscalar(s.predict_gradients(np.array([[x]]))[i])
         mu_errs = [check_grad(single_val, lambda x, i: [single_dval(x, i)], [x], 0) for x in xs]
         self.assertTrue(np.sum(mu_errs) < 1e-4)
 

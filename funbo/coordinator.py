@@ -7,7 +7,8 @@ import numpy as np
 import GPy
 
 # local imports
-from .utils import FixedAttributes, RegularGrid
+from .utils import FixedAttributes
+from .grid import RegularGrid
 from . import aux_optimisers
 from . import acquisition
 from .surrogates import GPySurrogate

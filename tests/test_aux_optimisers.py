@@ -77,7 +77,7 @@ class TestAuxOptimisers(unittest.TestCase):
 
         s = Schwefel(2)
         #s.plot()
-        xs, ys = aux_optimisers.maximise_quasi_Newton(s, s.bounds, num_its=100, num_take=20, exact_gradient=False, starting_points=None)
+        xs, ys = aux_optimisers.maximise_local_restarts(s, s.bounds, num_its=100, num_take=20, exact_gradient=False, starting_points=None)
         # xs and ys are the expected shapes
         self.assertTrue(xs.shape == (20, 2))
         self.assertTrue(ys.shape == (20, 1))
@@ -101,6 +101,23 @@ class TestAuxOptimisers(unittest.TestCase):
         self.assertTrue(np.isclose(y, s.maximum_y, atol=0.1))
         self.assertTrue(np.isclose(np.linalg.norm(x - s.maximum_x), 0, atol=1))
 
+    def test_take_n_largest_y(self):
+        data = np.array([
+            [2, 1],
+            [5, 2],
+            [0, 1],
+            [-9, 3]
+        ])
+        xs, ys = data[:,0].reshape(-1, 1), data[:,1].reshape(-1, 1)
+        bx, by = aux_optimisers.take_n_largest_y(xs, ys, num_take=0)
+        self.assertTrue(bx.shape == (0, 1))
+        self.assertTrue(by.shape == (0, 1))
+        bx, by = aux_optimisers.take_n_largest_y(xs, ys, num_take=1)
+        self.assertTrue(bx == np.array([[-9]]))
+        self.assertTrue(by == np.array([[3]]))
+        bx, by = aux_optimisers.take_n_largest_y(xs, ys, num_take=2)
+        self.assertTrue(np.array_equal(bx, np.array([[-9], [5]])))
+        self.assertTrue(np.array_equal(by, np.array([[3],[2]])))
 
 if __name__ == '__main__':
     unittest.main()

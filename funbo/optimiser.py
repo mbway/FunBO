@@ -284,7 +284,14 @@ class Optimiser(FixedAttributes):
         #TODO
 
 
-    def weighted_function_extraction(self, surrogate, c):
+    #TODO
+    # - create a zeroed amplitude tensor
+    # - create a tensor with the elements equal to the dot product between the traversal vector and the point at that index on the grid
+    # - get a list of indices and sort them based on the dot product (smallest first)
+    # - for each index, get the neighbouring indices, place down RBFs on the ones with lower dot product (behind the current)
+    #   - if the dot product is identical then have to have a well defined order to decide where the frontier is, perhaps lexicographic ordering. perhaps use the ordering of control_xs to determine. new function which takes an index and returns the position (n) in the grid, or a function which takes two indices into the grid and compares which comes first.
+    # - do the optimisation and add the entry into the amplitude tensor
+    def weighted_function_extraction_1D(self, surrogate, c):
         """
         Weighted Extraction:
             a hyperplane sweeps through the function input space along the given
